@@ -27,16 +27,43 @@ DEBUG = bool(int(os.environ.get("SPICE_DEBUG", "0")))
 SPICE_SYNONYMS = {
     # Kreuzkümmel
     "kreuzkuemmel": "kreuzkümmel", "kumin": "kreuzkümmel", "cumin": "kreuzkümmel",
+    "jeera": "kreuzkümmel",
     # Paprika
     "paprikapulver": "paprika", "geraeuchertes paprikapulver": "rauchpaprika",
     "geräuchertes paprikapulver": "rauchpaprika", "smoked paprika": "rauchpaprika",
+    "sweet paprika": "paprika", "hot paprika": "paprika",
     # Chili
     "chilipulver": "chili", "chiliepulver": "chili", "chili flakes": "chiliflocken",
+    "chili flake": "chiliflocken", "red pepper flakes": "chiliflocken",
+    "cayenne": "cayennepfeffer", "cayenne pepper": "cayennepfeffer",
     # Kurkuma
-    "curcuma": "kurkuma", "curcumapulver": "kurkuma",
-    # Pfeffer/Muskat u.a.
-    "muskatnuss": "muskat", "schwarzer pfeffer": "pfeffer",
-    "knoblauchgranulat": "knoblauchpulver", "zwiebelgranulat": "zwiebelpulver",
+    "curcuma": "kurkuma", "curcumapulver": "kurkuma", "turmeric": "kurkuma",
+    # Pfeffer
+    "muskatnuss": "muskat", "schwarzer pfeffer": "pfeffer", "black pepper": "pfeffer",
+    "white pepper": "weißpfeffer", "grüner pfeffer": "pfeffer", "green pepper": "pfeffer",
+    "pink pepper": "rosa pfeffer",
+    # Knoblauch/Zwiebel
+    "knoblauchgranulat": "knoblauchpulver", "knoblauch powder": "knoblauchpulver",
+    "garlic powder": "knoblauchpulver", "zwiebelgranulat": "zwiebelpulver",
+    "onion powder": "zwiebelpulver",
+    # Ingwer
+    "ground ginger": "ingwer", "ginger powder": "ingwer", "getrockneter ingwer": "ingwer",
+    # Zimt
+    "cinnamon powder": "zimt", "ground cinnamon": "zimt",
+    # Nelken
+    "clove": "nelken", "cloves": "nelken",
+    # Kardamom
+    "cardamom": "kardamom", "green cardamom": "kardamom",
+    # Koriander
+    "coriander": "koriander", "coriander seeds": "koriandersamen",
+    # Senf
+    "mustard seeds": "senfsamen", "gelbe senfsamen": "senfsamen",
+    # Fenchel
+    "fennel seeds": "fenchelsamen",
+    # Bockshornklee
+    "fenugreek": "bockshornklee", "methi": "bockshornklee",
+    # Anis
+    "star anise": "sternanis", "anise": "anis",
 }
 
 # Zusätzliche Reduktionsregeln (nur kosmetisch)

@@ -19,8 +19,12 @@
 // ============================================
 
 // ========== Stepper-Parameter ==========
-#define STEPS_PER_REV  200           // Vollschritt: 200 Schritte = 1 U
-#define PULSE_US       800           // Pulsdauer High/Low in µs (~625 SPS)
+#define STEPS_PER_REV   200          // Vollschritt: 200 Schritte = 1 U
+#define STEPS_PER_MOVE  95           // Weg pro Tastendruck
+#define PULSE_US        1800         // Pulsdauer High/Low in µs (größer = langsamer)
+// Richtungspegel (je nach Verkabelung ggf. tauschen)
+#define DIR_FWD         1
+#define DIR_REV         0
 // ======================================
 
 // ========== Servo-Parameter ============
@@ -159,16 +163,20 @@ void app_main(void) {
     uint32_t servo_pos_us = SERVO_START_US;
     servo_write_us(servo_pos_us);
 
+    // Toggle-Zustand für Stepper-Richtung: +1 = vorwärts, -1 = rückwärts
+    int step_dir_toggle = +1;
+
     ESP_LOGI(TAG, "Ready. BTN_STEP=GPIO%d, BTN_SERVO=GPIO%d, SERVO=GPIO%d",
              BTN_STEP, BTN_SERVO, SERVO_PIN);
 
     while (1) {
-        // Button 1 gedrückt? -> Stepper vor/zurück (1 U)
+        // Button 1 gedrückt? -> Stepper abwechselnd vorwärts/rückwärts
         if (edge_falling(BTN_STEP, &db_step)) {
-            ESP_LOGI(TAG, "Stepper: Vor 1U, Pause, Zurueck 1U");
-            move_steps_dir(STEPS_PER_REV, PULSE_US, 1);  // vorwärts
-            vTaskDelay(pdMS_TO_TICKS(300));
-            move_steps_dir(STEPS_PER_REV, PULSE_US, 0);  // rückwärts
+            int dir_level = (step_dir_toggle > 0) ? DIR_FWD : DIR_REV;
+            ESP_LOGI(TAG, "Stepper: %s %d Schritte",
+                     (dir_level == DIR_FWD) ? "Vor" : "Zurueck", STEPS_PER_MOVE);
+            move_steps_dir(STEPS_PER_MOVE, PULSE_US, dir_level);
+            step_dir_toggle = -step_dir_toggle; // Richtung fürs nächste Mal wechseln
         }
 
         // Button 2 gedrückt? -> Servo Start <-> End sanft toggeln

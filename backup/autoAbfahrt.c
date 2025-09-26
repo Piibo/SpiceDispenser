@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <string.h>
+#include <strings.h>  // für strcasecmp
 #include <ctype.h>
 #include <stdlib.h>
 #include "freertos/FreeRTOS.h"
@@ -21,10 +22,6 @@
 // =================== Konfig ===================
 #define STEP_PULSE_HIGH_US          4
 
-// -- Altwerte (nur noch Referenz) --
-// #define STEP_INTERSTEP_US_MOVE      1800
-// #define STEP_INTERSTEP_US_DISPENSE  2400
-
 // === RAMPENPROFILE ===
 // Kleinere Mikrosekunden = schneller
 typedef struct {
@@ -34,14 +31,14 @@ typedef struct {
 } speed_profile_t;
 
 // Fahrt (Wagen bewegen)
-#define MOVE_US_MIN            2500     // zügig
-#define MOVE_US_MAX            4000    // sanfter Start/Stopp
-#define MOVE_ACCEL_PER_STEP     25     // je Schritt ~25 us schneller/langsamer
+#define MOVE_US_MIN            2500
+#define MOVE_US_MAX            4000
+#define MOVE_ACCEL_PER_STEP      25
 
 // Ausgabe (Spindel drehen)
-#define DISP_US_MIN           1200
-#define DISP_US_MAX           2600
-#define DISP_ACCEL_PER_STEP     20
+#define DISP_US_MIN            1200
+#define DISP_US_MAX            2600
+#define DISP_ACCEL_PER_STEP      20
 
 static const speed_profile_t PROFILE_MOVE = {
     .us_min = MOVE_US_MIN,
@@ -72,14 +69,24 @@ static const speed_profile_t PROFILE_DISP = {
 
 // === Mechanik ===
 #define TRAVEL_STEPS_PER_STOP   88     // Schritte zwischen zwei Wagen-Positionen
-#define DISPENSE_STEPS_PER_REV  200    // Schritte für 1 volle Spindel-Umdrehung (anpassen)
+// WICHTIG: an Microstepping anpassen! Vollschritt=200, 1/16=3200, ...
+#define DISPENSE_STEPS_PER_REV  200    // Schritte für 1 volle Spindel-Umdrehung
 
 // === Wagenanzahl (konfigurierbar) ===
-#define POS_COUNT_DEFAULT       4      // <-- HIER die Anzahl deiner Wagen einstellen
+#define POS_COUNT_DEFAULT       4
 #define MAX_POS                 32
 
 // === Gewürz-Strings ===
 #define SPICE_NAME_MAX          24
+
+// === Mengenbegrenzung pro Position (Sicherheitsgeländer) ===
+#define MAX_DOSES_PER_POS       20
+
+// === Routing-Strategie ===
+#define ROUTE_KEEP_INPUT_ORDER  1      // 1 = Reihenfolge der ersten Nennung, 0 = nach Pos
+
+// === Dosierfaktor global (Dose -> Umdrehungen) ===
+#define ROTATIONS_PER_DOSE      1.0f   // z.B. 0.5 = halbe Umdr./Dose, 2.0 = zwei Umdr./Dose
 
 static const char *TAG = "SPICE_RUN";
 
@@ -90,6 +97,9 @@ static int pos_count = POS_COUNT_DEFAULT;
 
 // Regal-Mapping (pro Wagen ein Name, lowercased gespeichert)
 static char spices_map[MAX_POS][SPICE_NAME_MAX];
+
+// Optional: kalibrierbarer Dosisfaktor pro Position (1.0 = Standard)
+static float dose_factor_per_pos[MAX_POS];
 
 // =================== Stepper low-level ===================
 static inline void step_pulse_once(void){
@@ -102,11 +112,10 @@ static inline void set_dir(int lvl){
     esp_rom_delay_us(5);
 }
 
-// ---- NEU: Bewegung mit Beschl./Bremsrampe (Trapezprofil) ----
+// ---- Bewegung mit Beschl./Bremsrampe (Trapezprofil) ----
 static void move_steps_ramped(int delta_steps, const speed_profile_t *p){
     if(delta_steps == 0 || !p) return;
 
-    // Korrigierte Grenzen
     int us_min = (p->us_min < 200) ? 200 : p->us_min;   // nicht zu schnell
     int us_max = (p->us_max < us_min) ? us_min : p->us_max;
     int d_us   = (p->accel_per_step_us < 1) ? 1 : p->accel_per_step_us;
@@ -116,12 +125,10 @@ static void move_steps_ramped(int delta_steps, const speed_profile_t *p){
 
     set_dir(dir);
 
-    // Schritte zum Beschleunigen/Bremsen (linear)
     int accel_steps = (us_max - us_min + d_us - 1) / d_us; // aufrunden
     int decel_steps = accel_steps;
 
-    // Triangular-Fall abfangen (zu kurze Bewegungen)
-    if (2*accel_steps > cnt) {
+    if (2*accel_steps > cnt) {             // Triangular-Fall
         accel_steps = cnt / 2;
         decel_steps = cnt - accel_steps;
     }
@@ -129,7 +136,6 @@ static void move_steps_ramped(int delta_steps, const speed_profile_t *p){
 
     int us = us_max;
 
-    // Beschleunigen
     for (int i=0; i<accel_steps; ++i){
         step_pulse_once();
         esp_rom_delay_us(us);
@@ -137,15 +143,11 @@ static void move_steps_ramped(int delta_steps, const speed_profile_t *p){
         us -= d_us;
         if (us < us_min) us = us_min;
     }
-
-    // Plateau
     for (int i=0; i<plateau_steps; ++i){
         step_pulse_once();
         esp_rom_delay_us(us);
         abs_steps += (dir? +1 : -1);
     }
-
-    // Bremsen
     for (int i=0; i<decel_steps; ++i){
         step_pulse_once();
         esp_rom_delay_us(us);
@@ -212,10 +214,20 @@ static void goto_index(int target_idx){
     current_index = target_idx;
 }
 
+// Einzelumdrehung (weiter nutzbar, z.B. im Testmodus)
 static void dispense_one_full_rev(void){
     ESP_LOGI(TAG,"Ausgabe @Pos%d: 1 volle Umdrehung (%d steps)",
              current_index+1, DISPENSE_STEPS_PER_REV);
     move_steps_ramped(DISPENSE_STEPS_PER_REV, &PROFILE_DISP);
+}
+
+// Beliebige Anzahl Umdrehungen (float) als eine zusammenhängende Bewegung
+static void dispense_rotations(float rotations){
+    if (rotations <= 0.f) return;
+    int steps = (int)(rotations * (float)DISPENSE_STEPS_PER_REV + 0.5f);
+    ESP_LOGI(TAG,"Dispense @Pos%d: rotations=%.3f -> steps=%d",
+             current_index+1, rotations, steps);
+    move_steps_ramped(steps, &PROFILE_DISP);
 }
 
 // =================== Debounce ===================
@@ -261,45 +273,69 @@ static int find_pos_by_name(const char *name){
     return -1;
 }
 
-/**
- * Baut aus einer Gewürzliste die Ziel-Wagen (Indices) in der Reihenfolge der Liste.
- * unique_positions=true: denselben Wagen nur einmal anfahren (auch wenn Gewürz mehrfach verlangt).
- * Gibt Anzahl Targets zurück.
- */
-static int build_targets_from_spices(const char *recipe_spices[], int recipe_len,
-                                     int *out_indices, int out_max,
-                                     bool unique_positions)
-{
-    if(!recipe_spices || !out_indices || out_max<=0) return 0;
-    bool used[MAX_POS]={0};
-    int n=0;
-    ESP_LOGI(TAG,"Abgleich Gewürzliste (%d Einträge) mit Regal...", recipe_len);
+// =================== Mengenanforderungen ===================
+typedef struct { const char *name; int doses; } spice_req_t;
+typedef struct { int idx; int doses; } target_count_t;
 
-    for(int i=0;i<recipe_len && n<out_max;i++){
-        const char *want = recipe_spices[i];
-        int pos = find_pos_by_name(want);
+/**
+ * Baut Ziele mit Mengen (doses) aus einer Rezeptliste:
+ *  - summiert gleiche Positionen
+ *  - beschränkt doses auf MAX_DOSES_PER_POS
+ *  - Reihenfolge: erste Nennung im Input (oder alternativ nach Pos sortiert)
+ */
+static int build_targets_with_doses(const spice_req_t *reqs, int req_len,
+                                    target_count_t *out, int out_max)
+{
+    if(!reqs || !out || out_max<=0) return 0;
+
+    int counts[MAX_POS]={0};
+    bool seen[MAX_POS]={0};
+    int order[MAX_POS]; int order_n=0;
+
+    ESP_LOGI(TAG,"Abgleich Gewürz+Mengen (%d Einträge) mit Regal...", req_len);
+
+    for(int i=0;i<req_len;i++){
+        int want_doses = reqs[i].doses;
+        if(want_doses <= 0) continue;
+        int pos = find_pos_by_name(reqs[i].name);
         if(pos<0){
-            ESP_LOGW(TAG,"Nicht vorhanden: '%s'", want);
+            ESP_LOGW(TAG,"Nicht vorhanden: '%s' (anf. %d×)", reqs[i].name, want_doses);
             continue;
         }
-        if(unique_positions && used[pos]){
-            ESP_LOGI(TAG,"Schon in Targets: '%s' @Pos%d -> übersprungen", want, pos+1);
-            continue;
+        if(!seen[pos]){
+            seen[pos]=true;
+#if ROUTE_KEEP_INPUT_ORDER
+            order[order_n++] = pos;      // Reihenfolge der ersten Nennung
+#endif
         }
-        used[pos]=true;
-        out_indices[n++] = pos;
-        ESP_LOGI(TAG,"Match: '%s' -> Pos%d", want, pos+1);
+        long sum = (long)counts[pos] + (long)want_doses;
+        if(sum > MAX_DOSES_PER_POS) sum = MAX_DOSES_PER_POS;
+        counts[pos] = (int)sum;
+        ESP_LOGI(TAG,"Match: '%s' -> Pos%d (+%d) = %d×",
+                 reqs[i].name, pos+1, want_doses, counts[pos]);
     }
-    ESP_LOGI(TAG,"Targets gesamt: %d", n);
+
+    int n=0;
+#if ROUTE_KEEP_INPUT_ORDER
+    for(int k=0;k<order_n && n<out_max;k++){
+        int p = order[k];
+        if(counts[p]>0) out[n++] = (target_count_t){ .idx=p, .doses=counts[p] };
+    }
+#else
+    for(int p=0;p<pos_count && n<out_max;p++){
+        if(counts[p]>0) out[n++] = (target_count_t){ .idx=p, .doses=counts[p] };
+    }
+#endif
+    ESP_LOGI(TAG,"Targets gesamt (mit Mengen): %d", n);
     return n;
 }
 
 // =================== Zyklen ===================
-/** Nur die angegebenen Ziele abfahren und ausgeben, danach zurück zu Pos1 + Park. */
-static void run_cycle_targets(uint32_t *p_servo_pos, const int *targets, int n_targets){
-    if(!p_servo_pos || !targets || n_targets<=0) return;
+/** Ziele anfahren und pro Ziel zusammenhängend (doses * ROTATIONS_PER_DOSE * pos_factor) ausgeben. */
+static void run_cycle_targets_with_doses(uint32_t *p_servo_pos,
+                                         const target_count_t *tg, int n){
+    if(!p_servo_pos || !tg || n<=0) return;
 
-    // Sicherheitsgrenzen
     if(pos_count < 1) pos_count = 1;
     if(pos_count > MAX_POS) pos_count = MAX_POS;
 
@@ -307,19 +343,21 @@ static void run_cycle_targets(uint32_t *p_servo_pos, const int *targets, int n_t
     *p_servo_pos = servo_to_front(*p_servo_pos);
     vTaskDelay(pdMS_TO_TICKS(PAUSE_AFTER_COUPLE));
 
-    // Ziele in angegebener Reihenfolge anfahren
-    for(int j=0;j<n_targets;j++){
-        int idx = targets[j];
-        if(idx<0 || idx>=pos_count) continue;
+    for(int i=0;i<n;i++){
+        int idx   = tg[i].idx;
+        int doses = tg[i].doses;
+        if(idx<0 || idx>=pos_count || doses<=0) continue;
 
         goto_index(idx);
         vTaskDelay(pdMS_TO_TICKS(PAUSE_BEFORE_MOVE));
 
-        // Pause vor Auskoppeln + Ausgabe
         *p_servo_pos = decouple_to_back_with_pause(*p_servo_pos);
         vTaskDelay(pdMS_TO_TICKS(PAUSE_AFTER_COUPLE));
 
-        dispense_one_full_rev();
+        float rot = (float)doses * ROTATIONS_PER_DOSE * dose_factor_per_pos[idx];
+        ESP_LOGI(TAG,"Dosierung @Pos%d: doses=%d, faktor=%.2f -> rot=%.3f",
+                 idx+1, doses, dose_factor_per_pos[idx], rot);
+        dispense_rotations(rot);
         vTaskDelay(pdMS_TO_TICKS(PAUSE_AFTER_DISP));
 
         *p_servo_pos = servo_to_front(*p_servo_pos);
@@ -329,10 +367,10 @@ static void run_cycle_targets(uint32_t *p_servo_pos, const int *targets, int n_t
     // zurück zu Start und parken (mit Pause vor Auskoppeln)
     goto_index(0);
     *p_servo_pos = decouple_to_back_with_pause(*p_servo_pos);
-    ESP_LOGI(TAG,"Targets fertig: Pos1 erreicht, Servo hinten (Park/Start).");
+    ESP_LOGI(TAG,"Lauf (mit Mengen) fertig: Pos1 erreicht, Servo hinten (Park/Start).");
 }
 
-/** Alle Wagen nacheinander abfahren (Testmodus). */
+/** Testmodus: alle Wagen nacheinander 1× ausgeben. */
 static void run_cycle_all(uint32_t *p_servo_pos){
     if(!p_servo_pos) return;
 
@@ -361,12 +399,24 @@ static void run_cycle_all(uint32_t *p_servo_pos){
     ESP_LOGI(TAG,"Zyklus fertig: Pos1 erreicht, Servo hinten (Park/Start).");
 }
 
-// =================== Demo-Listen (Simulation AI-Output) ===================
-static const char *RECIPE_A[] = { "salz", "pfeffer", "paprika", "chiliflocken" }; // "chiliflocken" fehlt absichtlich
-static const int   RECIPE_A_LEN = sizeof(RECIPE_A)/sizeof(RECIPE_A[0]);
+// =================== Demo-Listen (Simulation AI-Output – mit Mengen) ===================
+static const spice_req_t RECIPE_A_Q[] = {
+    { "salz", 4 }, { "paprika", 2 }, { "rosmarin", 3 }, { "pfeffer", 1 }
+};
+static const int RECIPE_A_Q_LEN = sizeof(RECIPE_A_Q)/sizeof(RECIPE_A_Q[0]);
 
-static const char *RECIPE_B[] = { "rosmarin", "paprika", "salz" };
-static const int   RECIPE_B_LEN = sizeof(RECIPE_B)/sizeof(RECIPE_B[0]);
+static const spice_req_t RECIPE_B_Q[] = {
+    { "rosmarin", 5 }, { "salz", 4 }, { "salz", 1 }, { "paprika", 2 }
+};
+static const int RECIPE_B_Q_LEN = sizeof(RECIPE_B_Q)/sizeof(RECIPE_B_Q[0]);
+
+// =================== Init Kalibrierfaktoren ===================
+static void init_factors(void){
+    for(int i=0;i<MAX_POS;i++) dose_factor_per_pos[i] = 1.0f; // Default
+    // Beispiel-Kalibrierungen (optional):
+    // dose_factor_per_pos[0] = 0.9f;  // Salz etwas weniger
+    // dose_factor_per_pos[3] = 1.2f;  // Paprika etwas mehr
+}
 
 // =================== Main ===================
 void app_main(void){
@@ -427,26 +477,27 @@ void app_main(void){
     spice_set(1, "pfeffer");
     spice_set(2, "rosmarin");
     spice_set(3, "paprika");
-    // weitere Plätze bleiben leer ("") und werden ignoriert
+    // weitere Plätze leer lassen ("") -> ignoriert
 
-    ESP_LOGI(TAG,"Bereit. POS_COUNT=%d, TRAVEL=%d, DISP_REV=%d",
+    init_factors(); // Positions-Faktoren initialisieren (Standard 1.0)
+
+    ESP_LOGI(TAG,"Bereit. POS_COUNT=%d, TRAVEL=%d, DISP_REV=%d (Achte auf Microstepping!)",
              pos_count, TRAVEL_STEPS_PER_STOP, DISPENSE_STEPS_PER_REV);
 
-    // Demo: per Tastendruck wird zwischen Liste A und B gewechselt
+    // Demo: per Tastendruck wird zwischen Rezept A/B (mit Mengen) gewechselt
     int which_list = 0;
-    int targets[MAX_POS];
+    target_count_t targets[MAX_POS];
 
     while(1){
         if(edge_falling(BTN_STEP,&db_cycle)){
-            const char **list = (which_list==0)? RECIPE_A : RECIPE_B;
-            int list_len      = (which_list==0)? RECIPE_A_LEN : RECIPE_B_LEN;
-            ESP_LOGI(TAG,"BTN_STEP -> Rezeptliste %s", (which_list==0)?"A":"B");
+            const spice_req_t *reqs = (which_list==0)? RECIPE_A_Q : RECIPE_B_Q;
+            int req_len             = (which_list==0)? RECIPE_A_Q_LEN : RECIPE_B_Q_LEN;
+            ESP_LOGI(TAG,"BTN_STEP -> Rezeptliste %s (mit Mengen)", (which_list==0)?"A":"B");
 
-            // Abgleich AI-Liste -> Ziel-Wagen (ohne Duplikate)
-            int n_targets = build_targets_from_spices(list, list_len, targets, MAX_POS, true);
+            int n_targets = build_targets_with_doses(reqs, req_len, targets, MAX_POS);
 
             if(n_targets>0){
-                run_cycle_targets(&servo_pos, targets, n_targets);
+                run_cycle_targets_with_doses(&servo_pos, targets, n_targets);
             } else {
                 ESP_LOGW(TAG,"Keine passenden Gewürze im Regal -> kein Lauf.");
             }
@@ -457,7 +508,7 @@ void app_main(void){
         if(edge_falling(BTN_SERVO,&db_servo)){
             ESP_LOGI(TAG,"BTN_SERVO -> Servo Toggle");
             if(servo_pos==SERVO_BACK_US) servo_pos = servo_to_front(servo_pos);
-            else                          servo_pos = decouple_to_back_with_pause(servo_pos); // Pause vor Auskoppeln
+            else                          servo_pos = decouple_to_back_with_pause(servo_pos);
         }
         vTaskDelay(pdMS_TO_TICKS(10));
     }

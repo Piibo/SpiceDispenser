@@ -1,124 +1,120 @@
 #!/usr/bin/env python3
 """
-Spice Extractor v2
-- Wikipedia-DE/EN Plausibilitätscheck (robuster, sucht mehrere Treffer, ignoriert Disambiguation)
-- Hartes JSON aus LLM erzwingen (strict prompt + Fallback + Codefence-Strip + erste JSON-Array-Extraktion)
-- Umlaut- & Unicode-Normalisierung, Synonymmapping in DE-Schreibweise
-- Fehlerhandhabung (Timeouts), optionale Debug-Ausgabe
-- CLI mit reiner JSON-Ausgabe (--json-only)
-
-Abhängigkeiten: requests
-LLM: lokales Ollama (Standard: mistral)
+Spice Extractor v6
+- Wikipedia-DE/EN Plausibilitätscheck
+- Strikter Prompt mit Whitelist
+- Mengen in GRAMM je Gewürz (skalierbar nach Portionen + Intensität)
+- Harte Untergrenze, softes Maximum mit Warnungen
+- Normalisierung + Fuzzy-Whitelist
+- Sprachmodus (--voice) mit Whisper-ASR (speech_input.py)
 """
 
 from __future__ import annotations
-import os, sys, json, re, subprocess, urllib.parse, requests, unicodedata, time
+import os, sys, json, re, subprocess, urllib.parse, requests, unicodedata, time, serial
 from functools import lru_cache
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 
-# ---- Konfiguration ----
+# ================== Konfiguration ==================
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "mistral")
 OLLAMA_BIN = os.environ.get("OLLAMA_BIN", "ollama")
-OLLAMA_TIMEOUT = int(os.environ.get("OLLAMA_TIMEOUT", "25"))  # Sekunden für Subprozess
-WIKI_USER_AGENT = os.environ.get("WIKI_USER_AGENT", "SpiceDispenser/2.0 (+https://example.local)")
+OLLAMA_TIMEOUT = int(os.environ.get("OLLAMA_TIMEOUT", "25"))
+WIKI_USER_AGENT = os.environ.get("WIKI_USER_AGENT", "SpiceDispenser/6.0 (+https://example.local)")
 DEBUG = bool(int(os.environ.get("SPICE_DEBUG", "0")))
 
-# Synonyme/Normalisierung (keine Filterung!)
-SPICE_SYNONYMS = {
-    # Kreuzkümmel
-    "kreuzkuemmel": "kreuzkümmel", "kumin": "kreuzkümmel", "cumin": "kreuzkümmel",
-    "jeera": "kreuzkümmel",
-    # Paprika
+SOFT_MAX_FACTOR = 2.0
+
+SPICE_SYNONYMS: Dict[str, str] = {
+    "kreuzkuemmel": "kreuzkümmel", "kumin": "kreuzkümmel", "cumin": "kreuzkümmel", "jeera": "kreuzkümmel",
     "paprikapulver": "paprika", "geraeuchertes paprikapulver": "rauchpaprika",
     "geräuchertes paprikapulver": "rauchpaprika", "smoked paprika": "rauchpaprika",
     "sweet paprika": "paprika", "hot paprika": "paprika",
-    # Chili
     "chilipulver": "chili", "chiliepulver": "chili", "chili flakes": "chiliflocken",
     "chili flake": "chiliflocken", "red pepper flakes": "chiliflocken",
     "cayenne": "cayennepfeffer", "cayenne pepper": "cayennepfeffer",
-    # Kurkuma
     "curcuma": "kurkuma", "curcumapulver": "kurkuma", "turmeric": "kurkuma",
-    # Pfeffer
     "muskatnuss": "muskat", "schwarzer pfeffer": "pfeffer", "black pepper": "pfeffer",
     "white pepper": "weißpfeffer", "grüner pfeffer": "pfeffer", "green pepper": "pfeffer",
     "pink pepper": "rosa pfeffer",
-    # Knoblauch/Zwiebel
-    "knoblauchgranulat": "knoblauchpulver", "knoblauch powder": "knoblauchpulver",
-    "garlic powder": "knoblauchpulver", "zwiebelgranulat": "zwiebelpulver",
-    "onion powder": "zwiebelpulver",
-    # Ingwer
+    "knoblauchgranulat": "knoblauchpulver", "garlic powder": "knoblauchpulver",
+    "zwiebelgranulat": "zwiebelpulver", "onion powder": "zwiebelpulver",
     "ground ginger": "ingwer", "ginger powder": "ingwer", "getrockneter ingwer": "ingwer",
-    # Zimt
     "cinnamon powder": "zimt", "ground cinnamon": "zimt",
-    # Nelken
     "clove": "nelken", "cloves": "nelken",
-    # Kardamom
     "cardamom": "kardamom", "green cardamom": "kardamom",
-    # Koriander
     "coriander": "koriander", "coriander seeds": "koriandersamen",
-    # Senf
     "mustard seeds": "senfsamen", "gelbe senfsamen": "senfsamen",
-    # Fenchel
     "fennel seeds": "fenchelsamen",
-    # Bockshornklee
     "fenugreek": "bockshornklee", "methi": "bockshornklee",
-    # Anis
     "star anise": "sternanis", "anise": "anis",
+    "schwarzpepper": "pfeffer", "schwarz pfeffer": "pfeffer", "pepper": "pfeffer"
 }
 
-# Zusätzliche Reduktionsregeln (nur kosmetisch)
+SPICE_WHITELIST = {
+    "salz", "pfeffer", "weißpfeffer", "rosa pfeffer", "szechuanpfeffer",
+    "paprika", "rauchpaprika", "chili", "chiliflocken", "cayennepfeffer",
+    "kreuzkümmel", "koriander", "koriandersamen", "kurkuma", "ingwer",
+    "zimt", "muskat", "nelken", "kardamom", "fenchel", "fenchelsamen",
+    "senf", "senfsamen", "bockshornklee", "anis", "sternanis",
+    "piment", "lorbeer", "kümmel", "knoblauchpulver", "zwiebelpulver",
+    "currypulver", "garam masala", "tandoori masala"
+}
+
+GRAM_RULES_PER_SERV: Dict[str, Tuple[float, float]] = {
+    "salz": (0.2, 1.5), "pfeffer": (0.1, 0.8), "weißpfeffer": (0.1, 0.8),
+    "rosa pfeffer": (0.05, 0.3), "szechuanpfeffer": (0.05, 0.3),
+    "paprika": (0.3, 1.5), "rauchpaprika": (0.2, 1.0), "chili": (0.05, 0.5),
+    "chiliflocken": (0.05, 0.4), "cayennepfeffer": (0.03, 0.3),
+    "kreuzkümmel": (0.1, 0.6), "koriander": (0.05, 0.5), "koriandersamen": (0.05, 0.6),
+    "kurkuma": (0.05, 0.4), "ingwer": (0.05, 0.6), "zimt": (0.05, 0.4),
+    "muskat": (0.02, 0.15), "nelken": (0.01, 0.1), "kardamom": (0.02, 0.2),
+    "fenchel": (0.05, 0.6), "fenchelsamen": (0.05, 0.6), "senf": (0.05, 0.5),
+    "senfsamen": (0.05, 0.6), "bockshornklee": (0.02, 0.2), "anis": (0.02, 0.2),
+    "sternanis": (0.01, 0.1), "piment": (0.02, 0.2), "lorbeer": (0.01, 0.05),
+    "kümmel": (0.05, 0.6), "knoblauchpulver": (0.05, 0.6), "zwiebelpulver": (0.1, 0.8),
+    "currypulver": (0.2, 1.0), "garam masala": (0.1, 0.8), "tandoori masala": (0.1, 0.8),
+}
+DEFAULT_RULE = (0.05, 0.5)
+INTENSITY_SCALE = {"mild": 0.85, "medium": 1.0, "bold": 1.25}
+
 QUALIFIER_PATTERNS = [
     r"\bgemahlen\b", r"\bpulver\b", r"\bgetrocknet\b", r"\bfrisch\b",
     r"\bsamen\b", r"\bschoten\b", r"\bkörner\b", r"\bkoerner\b",
 ]
 
-# Keywords, die in der Wikipedia-Zusammenfassung vorkommen sollten
-WIKI_DISH_HINTS_DE = [
-    "gericht", "speise", "suppe", "eintopf", "sauce", "marinade", "paste",
+WIKI_DISH_HINTS_DE = ["gericht", "speise", "suppe", "eintopf", "sauce", "marinade", "paste",
     "auflauf", "salat", "dessert", "kuchen", "teig", "stew", "curry",
-    "nationalgericht", "küche", "kueche",
-]
-WIKI_DISH_HINTS_EN = [
-    "dish", "soup", "stew", "sauce", "curry", "marinade", "paste",
-    "salad", "dessert", "pie", "stew", "staple food", "national dish",
-]
-
-# -------------- Hilfsfunktionen --------------
+    "nationalgericht", "küche", "kueche"]
+WIKI_DISH_HINTS_EN = ["dish", "soup", "stew", "sauce", "curry", "marinade", "paste",
+    "salad", "dessert", "pie", "stew", "staple food", "national dish"]
 
 def _log(*a):
     if DEBUG:
         print("[DEBUG]", *a, file=sys.stderr)
 
-
 def _strip_code_fences(text: str) -> str:
-    # Entfernt ```json ... ``` oder ``` ... ``` Zäune
     text = re.sub(r"^\s*```(?:json|JSON)?\s*", "", text.strip())
     text = re.sub(r"\s*```\s*$", "", text)
     return text.strip()
 
-
 def _to_nfkc(s: str) -> str:
     return unicodedata.normalize("NFKC", s)
-
 
 def _norm_spaces(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
-
 def _de_umlaut_variants(s: str) -> str:
-    # ae->ä, oe->ö, ue->ü (nur wenn sinnvoll)
-    s2 = (s
-        .replace("ae", "ä")
-        .replace("oe", "ö")
-        .replace("ue", "ü")
-    )
-    return s2
+    return s.replace("ae", "ä").replace("oe", "ö").replace("ue", "ü")
 
-# -------------- Wikipedia --------------
+def _get_minmax_for(spice: str) -> Tuple[float, float]:
+    return GRAM_RULES_PER_SERV.get(spice, DEFAULT_RULE)
+
+def _round_gram(x: float) -> float:
+    if x < 0.2:
+        return round(x, 2)
+    return round(x, 1)
 
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": WIKI_USER_AGENT})
-
 
 def _wiki_get(url: str, params=None) -> Optional[dict]:
     try:
@@ -129,36 +125,26 @@ def _wiki_get(url: str, params=None) -> Optional[dict]:
         _log("wiki_get error:", e)
     return None
 
-
 @lru_cache(maxsize=256)
 def wiki_find_summary(dish: str) -> Optional[Tuple[str, str, str]]:
-    """Versucht erst DE, dann EN. Liefert (lang, title, description/extract) oder None."""
     dish_q = _norm_spaces(_to_nfkc(dish))
     for lang in ("de", "en"):
-        # 1) exakter Titel
-        url = f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{urllib.parse.quote(dish_q)}"
-        js = _wiki_get(url, {"redirect": "true"})
+        js = _wiki_get(f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{urllib.parse.quote(dish_q)}", {"redirect": "true"})
         if js and js.get("title") and js.get("type") != "disambiguation":
             desc = f"{js.get('description') or ''} {js.get('extract') or ''}".strip()
             if desc:
                 return lang, js.get("title"), desc
-
-        # 2) Suche -> bis zu 3 Ergebnisse prüfen
-        search_url = f"https://{lang}.wikipedia.org/w/rest.php/v1/search/title"
-        s = _wiki_get(search_url, {"q": dish_q, "limit": 3})
-        pages = (s or {}).get("pages") or []
-        for p in pages:
+        s = _wiki_get(f"https://{lang}.wikipedia.org/w/rest.php/v1/search/title", {"q": dish_q, "limit": 3})
+        for p in (s or {}).get("pages") or []:
             t = p.get("title")
             if not t:
                 continue
-            url2 = f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{urllib.parse.quote(t)}"
-            js2 = _wiki_get(url2, {"redirect": "true"})
+            js2 = _wiki_get(f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{urllib.parse.quote(t)}", {"redirect": "true"})
             if js2 and js2.get("title") and js2.get("type") != "disambiguation":
                 desc = f"{js2.get('description') or ''} {js2.get('extract') or ''}".strip()
                 if desc:
                     return lang, js2.get("title"), desc
     return None
-
 
 def is_known_dish(dish: str) -> bool:
     hit = wiki_find_summary(dish)
@@ -169,35 +155,28 @@ def is_known_dish(dish: str) -> bool:
     hints = WIKI_DISH_HINTS_DE if lang == "de" else WIKI_DISH_HINTS_EN
     return any(h in text for h in hints)
 
-# -------------- LLM & Parsing --------------
-
 def run_ollama(prompt: str) -> str:
     try:
-        p = subprocess.run(
-            [OLLAMA_BIN, "run", OLLAMA_MODEL],
-            input=prompt.encode("utf-8"),
-            capture_output=True,
-            timeout=OLLAMA_TIMEOUT,
-        )
+        p = subprocess.run([OLLAMA_BIN, "run", OLLAMA_MODEL],
+                           input=prompt.encode("utf-8"),
+                           capture_output=True,
+                           timeout=OLLAMA_TIMEOUT)
     except subprocess.TimeoutExpired:
         raise RuntimeError("ollama timeout")
     if p.returncode != 0:
         raise RuntimeError(p.stderr.decode(errors="ignore"))
     return p.stdout.decode("utf-8", errors="ignore").strip()
 
-
 def parse_json_list(text: str) -> Optional[List[str]]:
     if not text:
         return None
     t = _strip_code_fences(text)
-    # 1) Direktes JSON?
     try:
         v = json.loads(t)
         if isinstance(v, list):
             return [x for x in v if isinstance(x, str)]
     except Exception:
         pass
-    # 2) erste JSON-Liste aus Text extrahieren (nicht-gierige Klammerung)
     m = re.search(r"\[.*?\]", t, flags=re.S)
     if m:
         try:
@@ -208,22 +187,38 @@ def parse_json_list(text: str) -> Optional[List[str]]:
             pass
     return None
 
+def parse_json_spice_grams(text: str) -> Optional[List[dict]]:
+    if not text:
+        return None
+    t = _strip_code_fences(text)
+    try:
+        v = json.loads(t)
+        if isinstance(v, list) and all(isinstance(it, dict) for it in v):
+            return [{"name": it.get("name"), "grams": float(it.get("grams", 0.0))} for it in v if isinstance(it.get("name"), str)]
+    except Exception:
+        pass
+    m = re.search(r"\[.*?\]", t, flags=re.S)
+    if m:
+        try:
+            v = json.loads(m.group(0))
+            if isinstance(v, list) and all(isinstance(it, dict) for it in v):
+                return [{"name": it.get("name"), "grams": float(it.get("grams", 0.0))} for it in v if isinstance(it.get("name"), str)]
+        except Exception:
+            pass
+    return None
 
 def normalize_spices(items: List[str]) -> List[str]:
-    out: List[str] = []
-    for it in items:
-        s = _norm_spaces(_to_nfkc(it)).lower()
-        s = s.replace("(", "").replace(")", "")
-        # Qualifier entfernen
+    def _pre(s: str) -> str:
+        s = _norm_spaces(_to_nfkc(s)).lower()
+        s = re.sub(r"[(){}\[\],;:·•\-_/]+", " ", s)
         for pat in QUALIFIER_PATTERNS:
             s = re.sub(pat, "", s)
-        s = _norm_spaces(s)
-        # ae/oe/ue -> ä/ö/ü
-        s = _de_umlaut_variants(s)
-        # Synonyme anwenden
+        return _de_umlaut_variants(_norm_spaces(s))
+    out = []
+    for it in items:
+        s = _pre(it)
         s = SPICE_SYNONYMS.get(s, s)
         out.append(s)
-    # Deduplizieren (stabile Reihenfolge)
     seen, uniq = set(), []
     for s in out:
         if s and s not in seen:
@@ -231,73 +226,219 @@ def normalize_spices(items: List[str]) -> List[str]:
             uniq.append(s)
     return uniq
 
+def _fuzzy_match_to_whitelist(token: str) -> Optional[str]:
+    t = token.strip().lower()
+    if not t:
+        return None
+    if t in SPICE_WHITELIST:
+        return t
+    t2 = _norm_spaces(_de_umlaut_variants(re.sub(r"[^\wäöüß ]+", " ", t)))
+    if t2 in SPICE_WHITELIST:
+        return t2
+    def _char_overlap(a, b): return len(set(a) & set(b)) / max(1, len(set(a) | set(b)))
+    best, best_score = None, 0.0
+    for w in SPICE_WHITELIST:
+        score = _char_overlap(t2, w)
+        if score > best_score:
+            best, best_score = w, score
+    return best if best_score >= 0.6 else None
 
-def build_llm_prompt(dish: str) -> str:
+def build_llm_prompt(dish: str, servings: int, intensity: str) -> str:
+    allowed = ", ".join(f'"{w}"' for w in sorted(SPICE_WHITELIST))
     return (
         "Du bekommst NUR den Namen eines real existierenden Gerichts.\n"
-        "Antworte **AUSSCHLIESSLICH** mit einer **reinen JSON-Liste** (Array von Strings) der in Deutschland typischen \n"
-        "**Gewürze** für dieses Gericht. **Nur Gewürze** – keine frischen Kräuter (wenn als 'frisch' benannt),\n"
-        "keine Öle, keine Mengen, keine Erklärungen. Alles in **Kleinbuchstaben**.\n\n"
-        "Wenn du unsicher bist oder es keine typischen Gewürze gibt: gib **[]** zurück.\n\n"
-        f"Gericht: \"{dish.strip()}\"\n"
+        "Gib eine REINE JSON-LISTE zurück mit Objekten:\n"
+        '[{"name":"<gewürz>","grams":<zahl>}, ...]\n\n'
+        f"- 'name' NUR aus [{allowed}]\n"
+        "- 'grams' NUR in GRAMM (Zahl, kein String, kein 'g').\n"
+        f"- Für {servings} Portion(en), Intensität: {intensity}.\n"
+        "- Keine anderen Zutaten.\n"
+        "- Wenn keine Gewürze: [].\n\n"
+        f'Gericht: "{dish.strip()}"\nAntwort:'
     )
 
+def build_names_prompt(dish: str) -> str:
+    allowed = ", ".join(f'"{w}"' for w in sorted(SPICE_WHITELIST))
+    return (
+        "Du bekommst NUR den Namen eines Gerichts.\n"
+        "Antworte mit einer JSON-LISTE (Array von Strings) typischer Gewürze (nur Namen, klein).\n"
+        f"Erlaubt: [{allowed}]\n"
+        "Keine anderen Zutaten. Wenn keine: [].\n\n"
+        f'Gericht: "{dish.strip()}"\nAntwort:'
+    )
 
-def extract_spices_for_dish(dish: str) -> Tuple[List[str], str]:
-    # Wenn es KEIN echtes Gericht ist -> leere Liste
+def enforce_gram_rules(spice_objs: List[dict], servings: int, intensity: str) -> Tuple[List[dict], List[str]]:
+    warnings: List[str] = []
+    scale = INTENSITY_SCALE.get(intensity, 1.0)
+    names = [x["name"] for x in spice_objs]
+    norm_names = normalize_spices(names)
+    norm_objs = []
+    for i, obj in enumerate(spice_objs):
+        nm = _fuzzy_match_to_whitelist(norm_names[i])
+        if nm:
+            try: grams_val = float(obj.get("grams", 0.0))
+            except Exception: grams_val = 0.0
+            norm_objs.append({"name": nm, "grams": grams_val})
+    agg: Dict[str, float] = {}
+    for it in norm_objs:
+        agg[it["name"]] = agg.get(it["name"], 0.0) + it["grams"]
+    out: List[dict] = []
+    for name, g in agg.items():
+        mn, mx = _get_minmax_for(name)
+        mn_tot = mn * servings * scale
+        mx_tot = mx * servings * scale
+        soft_ceiling = mx_tot * SOFT_MAX_FACTOR
+        g0 = g if g > 0 else (mn_tot + mx_tot) / 2.0
+        if g0 < mn_tot:
+            if g0 > 0:
+                warnings.append(f"{name}: {g0:.3g} g unter Minimum ({mn_tot:.3g} g) → Minimum gesetzt.")
+            g_final = mn_tot
+        elif g0 <= mx_tot:
+            g_final = g0
+        elif g0 <= soft_ceiling:
+            warnings.append(f"{name}: {g0:.3g} g über Maximum ({mx_tot:.3g} g) – erlaubt (soft).")
+            g_final = g0
+        else:
+            warnings.append(f"{name}: {g0:.3g} g deutlich über Maximum; gedeckelt auf {soft_ceiling:.3g} g.")
+            g_final = soft_ceiling
+        out.append({"name": name, "grams": _round_gram(g_final)})
+    order = {w: i for i, w in enumerate(sorted(SPICE_WHITELIST))}
+    out.sort(key=lambda x: order.get(x["name"], 9999))
+    return out, warnings
+
+def extract_spices_for_dish_list(dish: str) -> Tuple[List[str], str]:
     if not is_known_dish(dish):
         return [], "(not a known dish)"
-
-    prompt = build_llm_prompt(dish) + "Antwort:"
-    out = run_ollama(prompt)
+    out = run_ollama(build_names_prompt(dish))
     lst = parse_json_list(out)
+    if not lst: return [], out
+    spices_norm = normalize_spices(lst)
+    spices_final = [s for s in spices_norm if _fuzzy_match_to_whitelist(s)]
+    return spices_final, out
 
-    if not lst:
-        # Fallback: ein Gewürz pro Zeile anfordern und selbst in Liste packen
-        prompt2 = (
-            f"Liste die typischen **Gewürze** für \"{dish.strip()}\" auf – eine pro Zeile, "
-            "Kleinbuchstaben, ohne Erklärungen. Wenn unsicher: keine Zeilen."
-        )
-        out2 = run_ollama(prompt2)
-        cand = [w.strip("-•:\t ").lower() for w in out2.splitlines() if w.strip()]
-        lst = [re.sub(r"[().]", "", c) for c in cand]
-
-    return normalize_spices(lst or []), out
-
-# -------------- CLI --------------
+def extract_spices_with_grams(dish: str, servings: int, intensity: str) -> Tuple[List[dict], str, List[str]]:
+    if not is_known_dish(dish):
+        return [], "(not a known dish)", []
+    out = run_ollama(build_llm_prompt(dish, servings, intensity))
+    objs = parse_json_spice_grams(out)
+    if not objs:
+        names, _ = extract_spices_for_dish_list(dish)
+        objs = [{"name": n, "grams": 0.0} for n in names]
+    final, warns = enforce_gram_rules(objs, servings, intensity)
+    return final, out, warns
 
 def main(argv: List[str]):
     import argparse
-    ap = argparse.ArgumentParser(description="Extrahiert Gewürze aus einem Gerichts-Namen")
-    ap.add_argument("dish", nargs="*", help="z. B. 'chili con carne'")
-    ap.add_argument("--json-only", action="store_true", help="Nur die JSON-Liste ausgeben")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("dish", nargs="*")
+    ap.add_argument("--json-only", action="store_true")
+    ap.add_argument("--voice", action="store_true")
+    ap.add_argument("--lang", default="de")
+    ap.add_argument("--servings", type=int, default=2)
+    ap.add_argument("--intensity", choices=list(INTENSITY_SCALE.keys()), default="medium")
+    ap.add_argument("--with-grams", action="store_true", default=True)
+    ap.add_argument("--names-only", action="store_true")
+    ap.add_argument("--serial", help="COM-Port, z.B. COM6 oder /dev/ttyUSB0")
+    ap.add_argument("--baud", type=int, default=115200)
     args = ap.parse_args(argv)
 
-    if args.dish:
-        dish = " ".join(args.dish)
+    if args.voice:
+        from speech_input import transcribe_once
+        utterance = transcribe_once(lang_hint=args.lang)
+        if not utterance:
+            print("Kein Sprachinput erkannt."); return
+        print(f"\n== Sprache erkannt ==\n{utterance}")
+        dish = utterance
     else:
-        dish = input("Gericht (z.B. 'chili con carne' / 'chicken marinade'): ").strip()
+        dish = " ".join(args.dish) if args.dish else input("Gericht: ").strip()
 
     start = time.time()
-    spices, raw = extract_spices_for_dish(dish)
+    if args.names_only and not args.with_grams:
+        spices, raw = extract_spices_for_dish_list(dish)
+        result, warnings_list = spices, []
+    else:
+        spice_objs, raw, warnings_list = extract_spices_with_grams(dish, args.servings, args.intensity)
+        result = spice_objs
     dur = time.time() - start
 
-    if args.json_only:
-        print(json.dumps(spices, ensure_ascii=False))
-        return
-
-    print("\n== Gericht ==")
-    print(dish)
-    print("== Gewürze ==")
-    if spices:
-        print(", ".join(spices))
+    if isinstance(result, list) and result and isinstance(result[0], dict):
+        payload = {"dish": dish, "spices": result}
     else:
-        print("(kein bekanntes Gericht → keine Gewürze)")
-    print("\nJSON:", json.dumps(spices, ensure_ascii=False))
-    if DEBUG:
-        print(f"\n[debug] duration={dur:.2f}s")
-        print("\n-- RAW --\n", raw)
+        payload = {"dish": dish, "spices": []}
 
+    line = json.dumps(payload, ensure_ascii=False) + "\n"
+
+    if args.serial:
+        try:
+            with serial.Serial(args.serial, args.baud, timeout=2) as ser:
+                time.sleep(0.4)
+                ser.write(line.encode("utf-8"))
+                ser.flush()
+                resp = ser.readline().decode(errors="ignore").strip()
+                if resp:
+                    print("Device:", resp)
+        except Exception as e:
+            print("SERIAL_ERROR:", e)
+    elif args.json-only:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print("\n== Gericht =="); print(dish)
+        if isinstance(result, list) and result and isinstance(result[0], dict):
+            print("== Gewürze (mit Gramm) ==")
+            for it in result: print(f"- {it['name']}: {it['grams']} g")
+            if warnings_list:
+                print("\nHinweise:")
+                for w in warnings_list: print("•", w)
+            print("\nJSON:", json.dumps(result, ensure_ascii=False))
+        else:
+            print("== Gewürze ==")
+            print(", ".join(result) if result else "(kein bekanntes Gericht)")
+            print("\nJSON:", json.dumps(result, ensure_ascii=False))
+        if DEBUG: print(f"[debug] duration={dur:.2f}s\n-- RAW --\n", raw)
+
+# ===== FastAPI Server-Modus =====
+from fastapi import FastAPI
+from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+import uvicorn
+
+app = FastAPI()
+
+class PlanReq(BaseModel):
+    dish: str
+    servings: int = 2
+    intensity: str = "medium"
+
+@app.post("/spiceplan")
+def spiceplan(req: PlanReq):
+    spice_objs, raw, warnings_list = extract_spices_with_grams(
+        req.dish, req.servings, req.intensity
+    )
+    return {"dish": req.dish, "spices": spice_objs, "notes": warnings_list}
+
+# --- Voice HTTP-API ---
+class VoiceReq(BaseModel):
+    lang: str = "de"
+    servings: int = 2
+    intensity: str = "medium"
+
+@app.post("/voiceplan")
+def voiceplan(req: VoiceReq):
+    from speech_input import transcribe_once
+    utter = transcribe_once(lang_hint=req.lang)
+    if not utter:
+        return JSONResponse({"dish": "", "spices": [], "warnings": ["no_voice"]}, status_code=200)
+    spice_objs, _raw, warnings_list = extract_spices_with_grams(
+        utter, req.servings, req.intensity
+    )
+    return {"dish": utter, "spices": spice_objs, "warnings": warnings_list}
+
+@app.get("/health")
+def health():
+    return {"ok": True}
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    if "--serve" in sys.argv:
+        uvicorn.run(app, host="0.0.0.0", port=8000)
+    else:
+        main(sys.argv[1:])

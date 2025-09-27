@@ -10,7 +10,7 @@ Spice Extractor v6
 """
 
 from __future__ import annotations
-import os, sys, json, re, subprocess, urllib.parse, requests, unicodedata, time
+import os, sys, json, re, subprocess, urllib.parse, requests, unicodedata, time, serial
 from functools import lru_cache
 from typing import List, Tuple, Optional, Dict
 
@@ -377,6 +377,8 @@ def main(argv: List[str]):
     ap.add_argument("--intensity", choices=list(INTENSITY_SCALE.keys()), default="medium")
     ap.add_argument("--with-grams", action="store_true", default=True)
     ap.add_argument("--names-only", action="store_true")
+    ap.add_argument("--serial", help="COM-Port, z.B. COM6 oder /dev/ttyUSB0")
+    ap.add_argument("--baud", type=int, default=115200)
     args = ap.parse_args(argv)
 
     if args.voice:
@@ -398,22 +400,77 @@ def main(argv: List[str]):
         result = spice_objs
     dur = time.time() - start
 
-    if args.json_only:
-        print(json.dumps(result, ensure_ascii=False)); return
-
-    print("\n== Gericht =="); print(dish)
+    # --- JSON-Zeile für das Gerät ---
     if isinstance(result, list) and result and isinstance(result[0], dict):
-        print("== Gewürze (mit Gramm) ==")
-        for it in result: print(f"- {it['name']}: {it['grams']} g")
-        if warnings_list:
-            print("\nHinweise:")
-            for w in warnings_list: print("•", w)
-        print("\nJSON:", json.dumps(result, ensure_ascii=False))
+        payload = {"dish": dish, "spices": result}
     else:
-        print("== Gewürze ==")
-        print(", ".join(result) if result else "(kein bekanntes Gericht)")
-        print("\nJSON:", json.dumps(result, ensure_ascii=False))
-    if DEBUG: print(f"[debug] duration={dur:.2f}s\n-- RAW --\n", raw)
+        payload = {"dish": dish, "spices": []}
+
+    line = json.dumps(payload, ensure_ascii=False) + "\n"
+
+    # --- Ausgabe / Senden ---
+    if args.serial:
+        try:
+            with serial.Serial(args.serial, args.baud, timeout=2) as ser:
+                time.sleep(0.4)  # Board-Reset abwarten
+                ser.write(line.encode("utf-8"))
+                ser.flush()
+                # erste Status-Zeile lesen (optional)
+                resp = ser.readline().decode(errors="ignore").strip()
+                if resp:
+                    print("Device:", resp)
+        except Exception as e:
+            print("SERIAL_ERROR:", e)
+    elif args.json-only:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print("\n== Gericht =="); print(dish)
+        if isinstance(result, list) and result and isinstance(result[0], dict):
+            print("== Gewürze (mit Gramm) ==")
+            for it in result: print(f"- {it['name']}: {it['grams']} g")
+            if warnings_list:
+                print("\nHinweise:")
+                for w in warnings_list: print("•", w)
+            print("\nJSON:", json.dumps(result, ensure_ascii=False))
+        else:
+            print("== Gewürze ==")
+            print(", ".join(result) if result else "(kein bekanntes Gericht)")
+            print("\nJSON:", json.dumps(result, ensure_ascii=False))
+        if DEBUG: print(f"[debug] duration={dur:.2f}s\n-- RAW --\n", raw)
+
+# ===== FastAPI Server-Modus =====
+from fastapi import FastAPI
+from pydantic import BaseModel
+import uvicorn
+
+app = FastAPI()
+
+class PlanReq(BaseModel):
+    dish: str
+    servings: int = 2
+    intensity: str = "medium"
+
+@app.post("/spiceplan")
+def spiceplan(req: PlanReq):
+    spice_objs, raw, warnings_list = extract_spices_with_grams(
+        req.dish, req.servings, req.intensity
+    )
+    return {
+        "dish": req.dish,
+        "spices": spice_objs,
+        "notes": warnings_list
+    }
+
+@app.get("/health")
+def health():
+    return {"ok": True}
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    if "--serve" in sys.argv:
+        # Server-Modus
+        uvicorn.run(app, host="0.0.0.0", port=8000)
+    else:
+        # CLI-Modus
+        main(sys.argv[1:])
+
+

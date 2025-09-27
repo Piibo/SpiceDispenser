@@ -21,10 +21,8 @@ OLLAMA_TIMEOUT = int(os.environ.get("OLLAMA_TIMEOUT", "25"))
 WIKI_USER_AGENT = os.environ.get("WIKI_USER_AGENT", "SpiceDispenser/6.0 (+https://example.local)")
 DEBUG = bool(int(os.environ.get("SPICE_DEBUG", "0")))
 
-# Softes Max: Faktor über typischem Maximum, bevor hart gedeckelt wird
 SOFT_MAX_FACTOR = 2.0
 
-# ---------- Synonyme/Normalisierung (harte Map) ----------
 SPICE_SYNONYMS: Dict[str, str] = {
     "kreuzkuemmel": "kreuzkümmel", "kumin": "kreuzkümmel", "cumin": "kreuzkümmel", "jeera": "kreuzkümmel",
     "paprikapulver": "paprika", "geraeuchertes paprikapulver": "rauchpaprika",
@@ -48,12 +46,9 @@ SPICE_SYNONYMS: Dict[str, str] = {
     "fennel seeds": "fenchelsamen",
     "fenugreek": "bockshornklee", "methi": "bockshornklee",
     "star anise": "sternanis", "anise": "anis",
-
-    # häufige Fehler/Schreibweisen
     "schwarzpepper": "pfeffer", "schwarz pfeffer": "pfeffer", "pepper": "pfeffer"
 }
 
-# ---------- Erlaubte Gewürze (Whitelist) ----------
 SPICE_WHITELIST = {
     "salz", "pfeffer", "weißpfeffer", "rosa pfeffer", "szechuanpfeffer",
     "paprika", "rauchpaprika", "chili", "chiliflocken", "cayennepfeffer",
@@ -64,60 +59,34 @@ SPICE_WHITELIST = {
     "currypulver", "garam masala", "tandoori masala"
 }
 
-# ---------- Mengen-Logik (g pro Portion) ----------
 GRAM_RULES_PER_SERV: Dict[str, Tuple[float, float]] = {
-    "salz": (0.2, 1.5),
-    "pfeffer": (0.1, 0.8),
-    "weißpfeffer": (0.1, 0.8),
-    "rosa pfeffer": (0.05, 0.3),
-    "szechuanpfeffer": (0.05, 0.3),
-    "paprika": (0.3, 1.5),
-    "rauchpaprika": (0.2, 1.0),
-    "chili": (0.05, 0.5),
-    "chiliflocken": (0.05, 0.4),
-    "cayennepfeffer": (0.03, 0.3),
-    "kreuzkümmel": (0.1, 0.6),
-    "koriander": (0.05, 0.5),
-    "koriandersamen": (0.05, 0.6),
-    "kurkuma": (0.05, 0.4),
-    "ingwer": (0.05, 0.6),
-    "zimt": (0.05, 0.4),
-    "muskat": (0.02, 0.15),
-    "nelken": (0.01, 0.1),
-    "kardamom": (0.02, 0.2),
-    "fenchel": (0.05, 0.6),
-    "fenchelsamen": (0.05, 0.6),
-    "senf": (0.05, 0.5),
-    "senfsamen": (0.05, 0.6),
-    "bockshornklee": (0.02, 0.2),
-    "anis": (0.02, 0.2),
-    "sternanis": (0.01, 0.1),
-    "piment": (0.02, 0.2),
-    "lorbeer": (0.01, 0.05),
-    "kümmel": (0.05, 0.6),
-    "knoblauchpulver": (0.05, 0.6),
-    "zwiebelpulver": (0.1, 0.8),
-    "currypulver": (0.2, 1.0),
-    "garam masala": (0.1, 0.8),
-    "tandoori masala": (0.1, 0.8),
+    "salz": (0.2, 1.5), "pfeffer": (0.1, 0.8), "weißpfeffer": (0.1, 0.8),
+    "rosa pfeffer": (0.05, 0.3), "szechuanpfeffer": (0.05, 0.3),
+    "paprika": (0.3, 1.5), "rauchpaprika": (0.2, 1.0), "chili": (0.05, 0.5),
+    "chiliflocken": (0.05, 0.4), "cayennepfeffer": (0.03, 0.3),
+    "kreuzkümmel": (0.1, 0.6), "koriander": (0.05, 0.5), "koriandersamen": (0.05, 0.6),
+    "kurkuma": (0.05, 0.4), "ingwer": (0.05, 0.6), "zimt": (0.05, 0.4),
+    "muskat": (0.02, 0.15), "nelken": (0.01, 0.1), "kardamom": (0.02, 0.2),
+    "fenchel": (0.05, 0.6), "fenchelsamen": (0.05, 0.6), "senf": (0.05, 0.5),
+    "senfsamen": (0.05, 0.6), "bockshornklee": (0.02, 0.2), "anis": (0.02, 0.2),
+    "sternanis": (0.01, 0.1), "piment": (0.02, 0.2), "lorbeer": (0.01, 0.05),
+    "kümmel": (0.05, 0.6), "knoblauchpulver": (0.05, 0.6), "zwiebelpulver": (0.1, 0.8),
+    "currypulver": (0.2, 1.0), "garam masala": (0.1, 0.8), "tandoori masala": (0.1, 0.8),
 }
 DEFAULT_RULE = (0.05, 0.5)
 INTENSITY_SCALE = {"mild": 0.85, "medium": 1.0, "bold": 1.25}
 
-# ---------- Qualifier ----------
 QUALIFIER_PATTERNS = [
     r"\bgemahlen\b", r"\bpulver\b", r"\bgetrocknet\b", r"\bfrisch\b",
     r"\bsamen\b", r"\bschoten\b", r"\bkörner\b", r"\bkoerner\b",
 ]
 
-# ---------- Wikipedia Hints ----------
 WIKI_DISH_HINTS_DE = ["gericht", "speise", "suppe", "eintopf", "sauce", "marinade", "paste",
     "auflauf", "salat", "dessert", "kuchen", "teig", "stew", "curry",
     "nationalgericht", "küche", "kueche"]
 WIKI_DISH_HINTS_EN = ["dish", "soup", "stew", "sauce", "curry", "marinade", "paste",
     "salad", "dessert", "pie", "stew", "staple food", "national dish"]
 
-# ================== Hilfsfunktionen ==================
 def _log(*a):
     if DEBUG:
         print("[DEBUG]", *a, file=sys.stderr)
@@ -144,7 +113,6 @@ def _round_gram(x: float) -> float:
         return round(x, 2)
     return round(x, 1)
 
-# ================== Wikipedia ==================
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": WIKI_USER_AGENT})
 
@@ -187,7 +155,6 @@ def is_known_dish(dish: str) -> bool:
     hints = WIKI_DISH_HINTS_DE if lang == "de" else WIKI_DISH_HINTS_EN
     return any(h in text for h in hints)
 
-# ================== LLM & Parsing ==================
 def run_ollama(prompt: str) -> str:
     try:
         p = subprocess.run([OLLAMA_BIN, "run", OLLAMA_MODEL],
@@ -240,7 +207,6 @@ def parse_json_spice_grams(text: str) -> Optional[List[dict]]:
             pass
     return None
 
-# ================== Normalisierung ==================
 def normalize_spices(items: List[str]) -> List[str]:
     def _pre(s: str) -> str:
         s = _norm_spaces(_to_nfkc(s)).lower()
@@ -277,7 +243,6 @@ def _fuzzy_match_to_whitelist(token: str) -> Optional[str]:
             best, best_score = w, score
     return best if best_score >= 0.6 else None
 
-# ================== Prompt ==================
 def build_llm_prompt(dish: str, servings: int, intensity: str) -> str:
     allowed = ", ".join(f'"{w}"' for w in sorted(SPICE_WHITELIST))
     return (
@@ -292,7 +257,6 @@ def build_llm_prompt(dish: str, servings: int, intensity: str) -> str:
         f'Gericht: "{dish.strip()}"\nAntwort:'
     )
 
-
 def build_names_prompt(dish: str) -> str:
     allowed = ", ".join(f'"{w}"' for w in sorted(SPICE_WHITELIST))
     return (
@@ -303,7 +267,6 @@ def build_names_prompt(dish: str) -> str:
         f'Gericht: "{dish.strip()}"\nAntwort:'
     )
 
-# ================== Mengenprüfung ==================
 def enforce_gram_rules(spice_objs: List[dict], servings: int, intensity: str) -> Tuple[List[dict], List[str]]:
     warnings: List[str] = []
     scale = INTENSITY_SCALE.get(intensity, 1.0)
@@ -343,7 +306,6 @@ def enforce_gram_rules(spice_objs: List[dict], servings: int, intensity: str) ->
     out.sort(key=lambda x: order.get(x["name"], 9999))
     return out, warnings
 
-# ================== Extraktion ==================
 def extract_spices_for_dish_list(dish: str) -> Tuple[List[str], str]:
     if not is_known_dish(dish):
         return [], "(not a known dish)"
@@ -365,7 +327,6 @@ def extract_spices_with_grams(dish: str, servings: int, intensity: str) -> Tuple
     final, warns = enforce_gram_rules(objs, servings, intensity)
     return final, out, warns
 
-# ================== CLI ==================
 def main(argv: List[str]):
     import argparse
     ap = argparse.ArgumentParser()
@@ -400,7 +361,6 @@ def main(argv: List[str]):
         result = spice_objs
     dur = time.time() - start
 
-    # --- JSON-Zeile für das Gerät ---
     if isinstance(result, list) and result and isinstance(result[0], dict):
         payload = {"dish": dish, "spices": result}
     else:
@@ -408,14 +368,12 @@ def main(argv: List[str]):
 
     line = json.dumps(payload, ensure_ascii=False) + "\n"
 
-    # --- Ausgabe / Senden ---
     if args.serial:
         try:
             with serial.Serial(args.serial, args.baud, timeout=2) as ser:
-                time.sleep(0.4)  # Board-Reset abwarten
+                time.sleep(0.4)
                 ser.write(line.encode("utf-8"))
                 ser.flush()
-                # erste Status-Zeile lesen (optional)
                 resp = ser.readline().decode(errors="ignore").strip()
                 if resp:
                     print("Device:", resp)
@@ -441,6 +399,7 @@ def main(argv: List[str]):
 # ===== FastAPI Server-Modus =====
 from fastapi import FastAPI
 from pydantic import BaseModel
+from fastapi.responses import JSONResponse
 import uvicorn
 
 app = FastAPI()
@@ -455,11 +414,24 @@ def spiceplan(req: PlanReq):
     spice_objs, raw, warnings_list = extract_spices_with_grams(
         req.dish, req.servings, req.intensity
     )
-    return {
-        "dish": req.dish,
-        "spices": spice_objs,
-        "notes": warnings_list
-    }
+    return {"dish": req.dish, "spices": spice_objs, "notes": warnings_list}
+
+# --- Voice HTTP-API ---
+class VoiceReq(BaseModel):
+    lang: str = "de"
+    servings: int = 2
+    intensity: str = "medium"
+
+@app.post("/voiceplan")
+def voiceplan(req: VoiceReq):
+    from speech_input import transcribe_once
+    utter = transcribe_once(lang_hint=req.lang)
+    if not utter:
+        return JSONResponse({"dish": "", "spices": [], "warnings": ["no_voice"]}, status_code=200)
+    spice_objs, _raw, warnings_list = extract_spices_with_grams(
+        utter, req.servings, req.intensity
+    )
+    return {"dish": utter, "spices": spice_objs, "warnings": warnings_list}
 
 @app.get("/health")
 def health():
@@ -467,10 +439,6 @@ def health():
 
 if __name__ == "__main__":
     if "--serve" in sys.argv:
-        # Server-Modus
         uvicorn.run(app, host="0.0.0.0", port=8000)
     else:
-        # CLI-Modus
         main(sys.argv[1:])
-
-

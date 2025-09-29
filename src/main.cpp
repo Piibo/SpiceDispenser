@@ -1,5 +1,5 @@
 // ======================= Spice Dispenser (ESP32-C6, Arduino) =======================
-// Variante A: Gerät ruft AI als HTTP-Service (FastAPI) auf.
+// Gerät ruft AI als HTTP-Service (FastAPI) auf.
 // Abhängigkeiten (PlatformIO lib_deps): ESP32Servo, ArduinoJson (v7)
 // Board: esp32-c6-devkitm-1  |  Framework: arduino
 

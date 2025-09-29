@@ -7,10 +7,15 @@
 #include "config.h"
 #include "mech.h"
 #include "ai.h"
+#include "ui.h"
 
 // --- Button Debounce/Edges (leichtgewichtig) ---
 struct DebState { uint8_t last_level{1}; uint8_t stable_level{1}; uint8_t stable_count{0}; };
 static DebState db_cycle, db_servo;
+
+// Guard-Variablen gegen Startup-False-Edge
+static bool         step_armed   = false;
+static unsigned long step_down_ms = 0;
 
 static int debounce_read(uint8_t pin, DebState* st){
   int level = digitalRead(pin);
@@ -20,16 +25,22 @@ static int debounce_read(uint8_t pin, DebState* st){
   return st->stable_level;
 }
 static bool edge_falling(uint8_t pin, DebState* st){
-  static uint8_t prev[64]={0};
-  int val = debounce_read(pin,st);
+  static uint8_t prev[64] = {0};
+  static bool inited[64]  = {false};
+  int val = debounce_read(pin, st);
+  if (!inited[pin]) { prev[pin] = val; inited[pin] = true; }   // Init mit aktuellem Level
   bool falling = (prev[pin]==HIGH && val==LOW);
-  prev[pin]=val; return falling;
+  prev[pin] = val;
+  return falling;
 }
 static bool edge_rising(uint8_t pin, DebState* st){
-  static uint8_t prev_up[64]={0};
-  int val = debounce_read(pin,st);
+  static uint8_t prev_up[64] = {0};
+  static bool inited[64]     = {false};
+  int val = debounce_read(pin, st);
+  if (!inited[pin]) { prev_up[pin] = val; inited[pin] = true; } // Init mit aktuellem Level
   bool rising = (prev_up[pin]==LOW && val==HIGH);
-  prev_up[pin]=val; return rising;
+  prev_up[pin] = val;
+  return rising;
 }
 
 // --- Spice-Mapping
@@ -136,29 +147,35 @@ void loop(){
   static unsigned long step_down_ms = 0;
   if (edge_falling(BTN_STEP, &db_cycle)) {
     step_down_ms = millis();
+    step_armed   = true;
     Serial.println("{\"btn\":\"STEP\",\"event\":\"edge_falling\",\"action\":\"arm\"}");
   }
   if (edge_rising(BTN_STEP, &db_cycle)) {
-    unsigned long dur = millis() - step_down_ms;
-    Serial.printf("{\"btn\":\"STEP\",\"event\":\"released\",\"press_ms\":%lu}\n", dur);
-    JsonDocument doc;
-    if (dur >= 800) {
-      Serial.println("[UI] Sprachmodus: Bitte am PC sprechen …");
-      if (ai_post_voice("de", 2, "medium", doc)) {
-        JsonArray spices = doc["spices"].as<JsonArray>();
-        if (!spices.isNull() && spices.size()>0) {
-          TargetGrams tg[MAX_POS]; int n = build_targets_with_grams(spices, tg, MAX_POS);
-          run_cycle_targets_grams(servo_pos_us, tg, n);
-        } else Serial.println("{\"error\":\"no_spices_from_ai\"}");
-      }
+    if (!step_armed) {
     } else {
-      Serial.println("[UI] Anfrage an AI: chili con carne");
-      if (ai_post_plan("chili con carne", 2, "medium", doc)) {
-        JsonArray spices = doc["spices"].as<JsonArray>();
-        if (!spices.isNull() && spices.size()>0) {
-          TargetGrams tg[MAX_POS]; int n = build_targets_with_grams(spices, tg, MAX_POS);
-          run_cycle_targets_grams(servo_pos_us, tg, n);
-        } else Serial.println("{\"error\":\"no_spices_from_ai\"}");
+      step_armed = false;  // consume
+      unsigned long dur = millis() - step_down_ms;
+      Serial.printf("{\"btn\":\"STEP\",\"event\":\"released\",\"press_ms\":%lu}\n", dur);
+
+      JsonDocument doc;
+      if (dur >= 800) {
+        Serial.println("[UI] Sprachmodus: Bitte am PC sprechen …");
+        if (ai_post_voice("de", 2, "medium", doc)) {
+          JsonArray spices = doc["spices"].as<JsonArray>();
+          if (!spices.isNull() && spices.size()>0) {
+            TargetGrams tg[MAX_POS]; int n = build_targets_with_grams(spices, tg, MAX_POS);
+            run_cycle_targets_grams(servo_pos_us, tg, n);
+          } else Serial.println("{\"error\":\"no_spices_from_ai\"}");
+        }
+      } else {
+        Serial.println("[UI] Anfrage an AI: chili con carne");
+        if (ai_post_plan("chili con carne", 2, "medium", doc)) {
+          JsonArray spices = doc["spices"].as<JsonArray>();
+          if (!spices.isNull() && spices.size()>0) {
+            TargetGrams tg[MAX_POS]; int n = build_targets_with_grams(spices, tg, MAX_POS);
+            run_cycle_targets_grams(servo_pos_us, tg, n);
+          } else Serial.println("{\"error\":\"no_spices_from_ai\"}");
+        }
       }
     }
   }

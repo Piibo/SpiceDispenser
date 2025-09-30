@@ -2,6 +2,8 @@
 #include <ArduinoJson.h>
 #include <cstring>
 #include <ctype.h>
+#include <vector>
+#include <string>
 
 #include "pins.h"
 #include "config.h"
@@ -9,14 +11,16 @@
 #include "ai.h"
 #include "ui.h"
 
-// --- Button Debounce/Edges (leichtgewichtig) ---
+// ---------------- Button Debounce/Edges ----------------
 struct DebState { uint8_t last_level{1}; uint8_t stable_level{1}; uint8_t stable_count{0}; };
-static DebState db_cycle, db_servo;
+static DebState db_sel, db_servo;
 
-// Guard-Variablen gegen Startup-False-Edge
-static bool         step_armed   = false;
-static unsigned long step_down_ms = 0;
+static bool voice_busy = false;
+static bool sel_armed = false;
+static unsigned long sel_down_ms = 0;
+static constexpr unsigned LONG_PRESS_MS = 800;
 
+// Debounce + Edges
 static int debounce_read(uint8_t pin, DebState* st){
   int level = digitalRead(pin);
   if(level == st->last_level){ if(st->stable_count<5) st->stable_count++; }
@@ -28,22 +32,13 @@ static bool edge_falling(uint8_t pin, DebState* st){
   static uint8_t prev[64] = {0};
   static bool inited[64]  = {false};
   int val = debounce_read(pin, st);
-  if (!inited[pin]) { prev[pin] = val; inited[pin] = true; }   // Init mit aktuellem Level
+  if (!inited[pin]) { prev[pin] = val; inited[pin] = true; }
   bool falling = (prev[pin]==HIGH && val==LOW);
   prev[pin] = val;
   return falling;
 }
-static bool edge_rising(uint8_t pin, DebState* st){
-  static uint8_t prev_up[64] = {0};
-  static bool inited[64]     = {false};
-  int val = debounce_read(pin, st);
-  if (!inited[pin]) { prev_up[pin] = val; inited[pin] = true; } // Init mit aktuellem Level
-  bool rising = (prev_up[pin]==LOW && val==HIGH);
-  prev_up[pin] = val;
-  return rising;
-}
 
-// --- Spice-Mapping
+// ---------------- Spice-Mapping ----------------
 static char  spices_map[MAX_POS][SPICE_NAME_MAX];
 static int   pos_count = POS_COUNT_DEFAULT;
 
@@ -61,23 +56,79 @@ static int find_pos_by_name(const char *name){
   return -1;
 }
 
-// --- Targets aus JSON (Gramm) ---
+// ---------------- Targets/Umrechnung ----------------
 struct TargetGrams { int idx; float grams; };
 
-static int build_targets_with_grams(JsonArray spices, TargetGrams* out, int out_max){
+// Robust: direkt aus dem JsonDocument lesen + starke Logs.
+static void docToUIRecipes(const JsonDocument& doc, const char* title, std::vector<UIRecipe>& out) {
+  JsonArrayConst arr = doc["spices"].as<JsonArrayConst>();
+  const char* ttl = (title && *title) ? title : (doc["title"] | doc["dish"] | "AI-Rezept");
+  Serial.printf("[CONV] docToUIRecipes: title='%s', spices.isNull=%d, size=%u\n",
+                ttl, arr.isNull()?1:0, (unsigned)(arr.isNull()?0:arr.size()));
+
+  out.clear();
+  UIRecipe r;
+  r.name = ttl ? ttl : "AI-Rezept";
+
+  if (!arr.isNull()) {
+    uint16_t i = 0;
+    for (JsonVariantConst v : arr) {
+      JsonObjectConst sp = v.as<JsonObjectConst>();
+      if (sp.isNull()) {
+        Serial.printf("  [CONV] [%u] not an object -> skip\n", i++);
+        continue;
+      }
+
+      // Namen robust ziehen (als Arduino String) und gleich in std::string kopieren
+      String nameS = sp["name"].as<String>();
+      double grams = 0.0;
+
+      if (sp["grams"].is<double>() || sp["grams"].is<float>() || sp["grams"].is<long>() || sp["grams"].is<int>()) {
+        grams = sp["grams"].as<double>();
+      } else {
+        // Fallback, falls grams als String kommt
+        String gS = sp["grams"].as<String>();
+        grams = gS.length() ? gS.toFloat() : 0.0;
+      }
+
+      Serial.printf("  [CONV] [%u] nameS='%s' grams=%.3f\n", i, nameS.c_str(), grams);
+
+      if (nameS.length() > 0 && grams > 0.0) {
+        r.spices.push_back(UISpice{ std::string(nameS.c_str()), grams });
+        Serial.printf("  [CONV] [%u] -> added to UI list\n", i);
+      } else {
+        Serial.printf("  [CONV] [%u] skipped (invalid name/grams)\n", i);
+      }
+      ++i;
+    }
+  }
+
+  if (!r.spices.empty()) {
+    out.push_back(r);
+    Serial.printf("[CONV] DONE -> out.size()=%u, first.count=%u\n",
+                  (unsigned)out.size(), (unsigned)out[0].spices.size());
+  } else {
+    Serial.println("[CONV] DONE -> NO SPICES -> out.size()=0");
+  }
+}
+
+// UI -> Mechanik-Targets
+static int build_targets_from_ui(const UIRecipe& r, TargetGrams* out, int out_max){
   if(out_max<=0) return 0;
   float grams_per_pos[MAX_POS]={0}; bool seen[MAX_POS]={0}; int order[MAX_POS]; int order_n=0;
-  for(JsonObject sp : spices){
-    const char* name = sp["name"]; float grams = sp["grams"] | 0.0f;
-    if(!name || grams<=0) continue;
-    int pos = find_pos_by_name(name);
-    if(pos<0){ Serial.printf("  - fehlt: '%s'\n", name); continue; }
-    grams_per_pos[pos] += grams;
-    if(!seen[pos]){ seen[pos]=true; order[order_n++]=pos; }
-    Serial.printf("  + match: '%s' -> Pos%d (+%.3f g) = %.3f g\n", name, pos+1, grams, grams_per_pos[pos]);
+
+  for (const auto& s : r.spices) {
+    if (s.amount <= 0) continue;
+    int pos = find_pos_by_name(s.name.c_str());
+    if (pos < 0) { Serial.printf("[MAP] fehlt: '%s'\n", s.name.c_str()); continue; }
+    grams_per_pos[pos] += (float)s.amount;
+    if (!seen[pos]) { seen[pos] = true; order[order_n++] = pos; }
+    Serial.printf("[MAP] + '%s' -> Pos%d (+%.3f g) = %.3f g\n",
+                  s.name.c_str(), pos+1, (float)s.amount, grams_per_pos[pos]);
   }
+
   int n=0; for(int k=0;k<order_n && n<out_max;k++){ int p = order[k]; if(grams_per_pos[p]>0) out[n++] = TargetGrams{ p, grams_per_pos[p] }; }
-  Serial.printf("[MATCH] targets=%d\n", n); return n;
+  Serial.printf("[MAP] targets=%d\n", n); return n;
 }
 
 static void run_cycle_targets_grams(uint32_t& servo_pos_us, const TargetGrams* tg, int n){
@@ -93,7 +144,7 @@ static void run_cycle_targets_grams(uint32_t& servo_pos_us, const TargetGrams* t
     servo_pos_us = mechDecoupleBack(servo_pos_us); delay(PAUSE_AFTER_COUPLE);
 
     float gpr = (GRAMS_PER_ROTATION[idx] > 0.001f) ? GRAMS_PER_ROTATION[idx] : 1.0f;
-    float rotations = (grams / gpr); // optional: * Faktor pro Position
+    float rotations = (grams / gpr);
     Serial.printf("[DOSE] Pos%d: grams=%.3f, g/rot=%.3f -> rot=%.3f\n", idx+1, grams, gpr, rotations);
 
     mechDispenseRotations(rotations); delay(PAUSE_AFTER_DISP);
@@ -105,15 +156,105 @@ static void run_cycle_targets_grams(uint32_t& servo_pos_us, const TargetGrams* t
   Serial.println("[DONE] Pos1 erreicht, Servo hinten (Park/Start).");
 }
 
-// --- Serial-Kommandopuffer ---
+// ---------------- Encoder -> potRaw für ui_tick() ----------------
+static int potEmu = 0; // 0..4095
+#ifndef POT_BITS
+#define POT_BITS 4095
+#endif
+static int readEncoderDelta(){
+  static uint8_t prev = 0;
+  uint8_t s = (digitalRead(ROT_CLK) ? 2 : 0) | (digitalRead(ROT_DT) ? 1 : 0);
+  int delta = 0;
+  if ((prev==0b00 && s==0b01) || (prev==0b01 && s==0b11) || (prev==0b11 && s==0b10) || (prev==0b10 && s==0b00)) delta = +1;
+  else if ((prev==0b00 && s==0b10) || (prev==0b10 && s==0b11) || (prev==0b11 && s==0b01) || (prev==0b01 && s==0b00)) delta = -1;
+  prev = s;
+  return delta;
+}
+
+// ---------------- Serial / Globals ----------------
 static String serialCmd;
 static uint32_t servo_pos_us = SERVO_BACK_US;
+
+// ---------------- Voice & Fixed Plan Flows ----------------
+static void startVoiceAndShowResult() {
+  Serial.println("[VOICE] startVoiceAndShowResult()");
+  ui_renderVoiceInputScreen(); // „Wir hören zu…“
+
+  auto onSending = [](){
+    Serial.println("[VOICE] VAD ended -> sending now");
+    ui_renderVoiceSendRequestScreen();
+  };
+
+  JsonDocument doc;
+  if (ai_post_voice("de", 2, "medium", doc, onSending)) {
+    Serial.println("[VOICE] ai_post_voice OK");
+
+    const char* title = doc["title"] | doc["dish"] | "AI-Rezept";
+    JsonArrayConst spicesDbg = doc["spices"].as<JsonArrayConst>();
+    Serial.printf("[VOICE] title='%s', spices.isNull=%d, spices.size=%u\n",
+                  title, spicesDbg.isNull()?1:0, (unsigned)(spicesDbg.isNull()?0:spicesDbg.size()));
+
+    std::vector<UIRecipe> uiRecipes;
+    docToUIRecipes(doc, title, uiRecipes);
+
+    if (!uiRecipes.empty()) {
+      Serial.printf("[VOICE] UI recipes now=%u, first count=%u\n",
+                    (unsigned)uiRecipes.size(), (unsigned)uiRecipes[0].spices.size());
+      for (size_t k=0; k<uiRecipes[0].spices.size(); ++k) {
+        Serial.printf("  [VOICE/UI] %u: '%s' -> %.3f g\n", (unsigned)k,
+                      uiRecipes[0].spices[k].name.c_str(),
+                      uiRecipes[0].spices[k].amount);
+      }
+      ui_showAIResult(uiRecipes);
+    } else {
+      Serial.println("[VOICE] UI recipes STILL 0 -> show error");
+      ui_showAIError("Keine Gewuerze erkannt");
+    }
+  } else {
+    Serial.println("[VOICE] ai_post_voice FAILED");
+    ui_showAIError("AI-Fehler");
+  }
+}
+
+static void startFixedPlanAndShow(const char* dish) {
+  Serial.printf("[PLAN] startFixedPlanAndShow dish='%s'\n", dish);
+  auto onSending = [](){
+    Serial.println("[PLAN] sending now");
+    ui_renderVoiceSendRequestScreen();
+  };
+
+  JsonDocument doc;
+  if (ai_post_plan(dish, 2, "medium", doc, onSending)) {
+    Serial.println("[PLAN] ai_post_plan OK");
+
+    const char* title = doc["title"] | doc["dish"] | dish;
+    JsonArrayConst spicesDbg = doc["spices"].as<JsonArrayConst>();
+    Serial.printf("[PLAN] title='%s', spices.isNull=%d, spices.size=%u\n",
+                  title, spicesDbg.isNull()?1:0, (unsigned)(spicesDbg.isNull()?0:spicesDbg.size()));
+
+    std::vector<UIRecipe> uiRecipes;
+    docToUIRecipes(doc, title, uiRecipes);
+
+    if (!uiRecipes.empty()) {
+      Serial.printf("[PLAN] UI recipes now=%u, first count=%u\n",
+                    (unsigned)uiRecipes.size(), (unsigned)uiRecipes[0].spices.size());
+      ui_showAIResult(uiRecipes);
+    } else {
+      ui_showAIError("Keine Gewuerze erkannt");
+    }
+  } else {
+    Serial.println("[PLAN] ai_post_plan FAILED");
+    ui_showAIError("AI-Fehler");
+  }
+}
 
 void setup(){
   Serial.begin(115200); delay(150);
 
-  pinMode(BTN_STEP,  INPUT_PULLUP);
+  pinMode(BTN_SEL,   INPUT_PULLUP);
   pinMode(BTN_SERVO, INPUT_PULLUP);
+  pinMode(ROT_CLK,   INPUT_PULLUP);
+  pinMode(ROT_DT,    INPUT_PULLUP);
 
   mechInit();
   mechSetPosCount(POS_COUNT_DEFAULT);
@@ -126,16 +267,23 @@ void setup(){
   spice_set(2, "rosmarin");
   spice_set(3, "paprika");
 
-  // Initiale Buttonlevels merken
-  db_cycle.last_level = db_cycle.stable_level = digitalRead(BTN_STEP);
+  db_sel.last_level   = db_sel.stable_level   = digitalRead(BTN_SEL);
   db_servo.last_level = db_servo.stable_level = digitalRead(BTN_SERVO);
+
+  ui_init();
 
   wifi_connect();
   ai_health();
+
   Serial.println("{\"status\":\"ready\"}");
 }
 
 void loop(){
+  // Encoder -> UI
+  int d = readEncoderDelta();
+  if (d != 0) potEmu = constrain(potEmu + d * 64, 0, POT_BITS);
+  ui_tick(potEmu);
+
   // SERVO-Toggle
   if (edge_falling(BTN_SERVO, &db_servo)) {
     Serial.println("{\"btn\":\"SERVO\",\"event\":\"edge_falling\",\"action\":\"servo_toggle\"}");
@@ -143,44 +291,32 @@ void loop(){
     else                               servo_pos_us = mechDecoupleBack(servo_pos_us);
   }
 
-  // STEP: Kurz/ Lang
-  static unsigned long step_down_ms = 0;
-  if (edge_falling(BTN_STEP, &db_cycle)) {
-    step_down_ms = millis();
-    step_armed   = true;
-    Serial.println("{\"btn\":\"STEP\",\"event\":\"edge_falling\",\"action\":\"arm\"}");
+  // SEL press-duration handling (falling-only + Dauer)
+  if (edge_falling(BTN_SEL, &db_sel)) {
+    sel_armed = true;
+    sel_down_ms = millis();
   }
-  if (edge_rising(BTN_STEP, &db_cycle)) {
-    if (!step_armed) {
-    } else {
-      step_armed = false;  // consume
-      unsigned long dur = millis() - step_down_ms;
-      Serial.printf("{\"btn\":\"STEP\",\"event\":\"released\",\"press_ms\":%lu}\n", dur);
+  if (sel_armed && digitalRead(BTN_SEL) == HIGH) {
+    unsigned long dur = millis() - sel_down_ms;
+    sel_armed = false;
 
-      JsonDocument doc;
-      if (dur >= 800) {
-        Serial.println("[UI] Sprachmodus: Bitte am PC sprechen …");
-        if (ai_post_voice("de", 2, "medium", doc)) {
-          JsonArray spices = doc["spices"].as<JsonArray>();
-          if (!spices.isNull() && spices.size()>0) {
-            TargetGrams tg[MAX_POS]; int n = build_targets_with_grams(spices, tg, MAX_POS);
-            run_cycle_targets_grams(servo_pos_us, tg, n);
-          } else Serial.println("{\"error\":\"no_spices_from_ai\"}");
+    UIScreen scr = ui_getState().screen;
+    if (scr == UIScreen::START) {
+      if (!voice_busy) {
+        voice_busy = true;
+        if (dur >= LONG_PRESS_MS) {
+          startFixedPlanAndShow("chili con carne");
+        } else {
+          startVoiceAndShowResult();
         }
-      } else {
-        Serial.println("[UI] Anfrage an AI: chili con carne");
-        if (ai_post_plan("chili con carne", 2, "medium", doc)) {
-          JsonArray spices = doc["spices"].as<JsonArray>();
-          if (!spices.isNull() && spices.size()>0) {
-            TargetGrams tg[MAX_POS]; int n = build_targets_with_grams(spices, tg, MAX_POS);
-            run_cycle_targets_grams(servo_pos_us, tg, n);
-          } else Serial.println("{\"error\":\"no_spices_from_ai\"}");
-        }
+        voice_busy = false;
       }
+    } else {
+      ui_onBtnClick(); // normaler UI-Klick in DETAIL/EDIT
     }
   }
 
-  // Optional: Serial 'dish: <text>'
+  // Serial 'dish: <text>' (Test)
   while (Serial.available()){
     char c=(char)Serial.read();
     if(c=='\n'){
@@ -190,12 +326,14 @@ void loop(){
         if(dish.length()>0){
           Serial.printf("[SERIAL] dish='%s'\n", dish.c_str());
           JsonDocument doc;
-          if (ai_post_plan(dish, 2, "medium", doc)) {
-            JsonArray spices = doc["spices"].as<JsonArray>();
-            if (!spices.isNull() && spices.size()>0) {
-              TargetGrams tg[MAX_POS]; int n = build_targets_with_grams(spices, tg, MAX_POS);
-              run_cycle_targets_grams(servo_pos_us, tg, n);
-            } else Serial.println("{\"error\":\"no_spices_from_ai\"}");
+          if (ai_post_plan(dish.c_str(), 2, "medium", doc)) {
+            std::vector<UIRecipe> uiRecipes;
+            const char* title = doc["title"] | doc["dish"] | "AI-Rezept";
+            docToUIRecipes(doc, title, uiRecipes);
+            if (!uiRecipes.empty()) ui_showAIResult(uiRecipes);
+            else ui_showAIError("Keine Gewuerze erkannt");
+          } else {
+            ui_showAIError("AI-Fehler");
           }
         }
       }
@@ -203,6 +341,32 @@ void loop(){
     } else if (c!='\r'){
       serialCmd += c;
       if(serialCmd.length()>512) serialCmd="";
+    }
+  }
+
+  // Nach „OK/Weiter“ aus der UI dosieren
+  UIRecipe edited;
+  if (ui_takeEditedRecipe(edited)) {
+    Serial.printf("[UI] confirm -> recipe='%s' items=%u\n",
+                  edited.name.c_str(), (unsigned)edited.spices.size());
+    for (size_t i=0;i<edited.spices.size();++i) {
+      Serial.printf("  [UI] %u: '%s' -> %.3f g\n", (unsigned)i,
+        edited.spices[i].name.c_str(), edited.spices[i].amount);
+    }
+
+    TargetGrams tg[MAX_POS];
+    int n = build_targets_from_ui(edited, tg, MAX_POS);
+    for (int i=0;i<n;i++) {
+      Serial.printf("  [MAP] idx=%d grams=%.3f\n", tg[i].idx, tg[i].grams);
+    }
+
+    if (n > 0) {
+      Serial.println("[MECH] start run_cycle_targets_grams()");
+      run_cycle_targets_grams(servo_pos_us, tg, n);
+      Serial.println("[MECH] end run_cycle_targets_grams()");
+      ui_goStart();
+    } else {
+      Serial.println("{\"status\":\"noop\"}");
     }
   }
 

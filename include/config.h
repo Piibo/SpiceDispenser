@@ -7,17 +7,25 @@ inline constexpr const char* WIFI_PW   = "YOUR_WIFI_PASSWORD";
 inline constexpr const char* AI_URL    = "http://10.57.144.53:8000/spiceplan";
 inline constexpr const char* AI_HEALTH = "http://10.57.144.53:8000/health";
 
-// --- Pins / IO-Timings sind in pins.h bzw. mech.cpp ---
-
 // --- Mechanik / Geometrie ---
-inline constexpr int TRAVEL_STEPS_PER_STOP  = 80;
-inline constexpr int DISPENSE_STEPS_PER_REV = 200;
-inline constexpr int POS_COUNT_DEFAULT      = 5;
-inline constexpr int MAX_POS                = 32;
-inline constexpr int SPICE_NAME_MAX         = 24;
+// Volle 360°-Umdrehung der Trommel in Steps (kalibrieren!)
+// Beispiel: ~88 Steps/Slot bei 5 Slots -> 5 * 88 = 440
+inline constexpr long TRAVEL_STEPS_PER_REV = 440;   // ggf. 400, wenn 80/Slot
+inline constexpr long HOME_OFFSET_STEPS    = 0;     // Feinoffset nach Homing (± wenige Steps)
+
+inline constexpr int  DISPENSE_STEPS_PER_REV = 200; // Dosierschnecke (Steps/Rotation)
+inline constexpr int  POS_COUNT_DEFAULT      = 5;
+inline constexpr int  MAX_POS                = 32;
+inline constexpr int  SPICE_NAME_MAX         = 24;
+
+// --- Mechanik-Schalter ---
+inline constexpr bool MECH_SHORTEST_PATH = false; // true = kürzester Weg (bei dir lieber AUS)
+inline constexpr bool MECH_ALWAYS_CW     = false; // true = immer vorwärts (Uhrzeigersinn)
+inline constexpr bool MECH_DIR_INVERT    = false; // true = DIR-Pin-Polarität invertieren
 
 // --- Rampenprofile ---
 struct speed_profile_t { int us_min; int us_max; int accel_per_step_us; };
+// Deine bisherigen Werte:
 inline constexpr speed_profile_t PROFILE_MOVE {2500, 4000, 25};
 inline constexpr speed_profile_t PROFILE_DISP {1200, 2600, 20};
 
@@ -35,5 +43,14 @@ inline constexpr int      PAUSE_AFTER_DISP     = 80;
 
 // --- Kalibrierung g pro Umdrehung (pro Position) ---
 inline float GRAMS_PER_ROTATION[MAX_POS] = {
-  2.0, 1.5, 1.2, 1.8 // Pos 1..4 (anpassen/erweitern)
+  // Deine ersten vier:
+  2.0f, 1.5f, 1.2f, 1.8f,   // 1..4
+  // Rest Default (bitte je Slot später messen & anpassen):
+  1.5f, 1.5f, 1.5f, 1.5f,   // 5..8
+  1.5f, 1.5f, 1.5f, 1.5f,   // 9..12
+  1.5f, 1.5f, 1.5f, 1.5f,   // 13..16
+  1.5f, 1.5f, 1.5f, 1.5f,   // 17..20
+  1.5f, 1.5f, 1.5f, 1.5f,   // 21..24
+  1.5f, 1.5f, 1.5f, 1.5f,   // 25..28
+  1.5f, 1.5f, 1.5f, 1.5f    // 29..32
 };

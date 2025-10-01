@@ -120,7 +120,7 @@ static void drawRecipeDetail(bool editing) {
       // "Zurueck" (ganz unten)
       u8g2.setFont(FONT_TEXT);
       u8g2.drawStr(TEXT_X, y, "Zurueck");
-      drawIcon(IconType::Right, 118, y);
+      drawIcon(IconType::Left, 118, y);
     } else {
       // Gewuerz: Index in der Rezeptliste ist i-1
       const UISpice& sp = recipe.spices[i - 1];

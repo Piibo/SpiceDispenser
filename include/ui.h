@@ -28,3 +28,6 @@ void ui_showAIResult(const std::vector<UIRecipe>& recipes);
 void ui_showAIError(const char* msg);
 
 void ui_goStart();
+
+void ui_nudgeSelection(int delta);
+void ui_nudgeAmount(int delta);

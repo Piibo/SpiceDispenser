@@ -10,8 +10,8 @@
 
 // Rotary / Select-Button
 #define BTN_SEL    22 //grün
-#define ROT_CLK    2 //orange
-#define ROT_DT     3 //gelb
+#define ROT_CLK    2 //gelb
+#define ROT_DT     3 //orange
 
 
 //Display

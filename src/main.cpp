@@ -79,14 +79,12 @@ static void docToUIRecipes(const JsonDocument& doc, const char* title, std::vect
         continue;
       }
 
-      // Namen robust ziehen (als Arduino String) und gleich in std::string kopieren
       String nameS = sp["name"].as<String>();
       double grams = 0.0;
 
       if (sp["grams"].is<double>() || sp["grams"].is<float>() || sp["grams"].is<long>() || sp["grams"].is<int>()) {
         grams = sp["grams"].as<double>();
       } else {
-        // Fallback, falls grams als String kommt
         String gS = sp["grams"].as<String>();
         grams = gS.length() ? gS.toFloat() : 0.0;
       }
@@ -156,19 +154,34 @@ static void run_cycle_targets_grams(uint32_t& servo_pos_us, const TargetGrams* t
   Serial.println("[DONE] Pos1 erreicht, Servo hinten (Park/Start).");
 }
 
-// ---------------- Encoder -> potRaw für ui_tick() ----------------
-static int potEmu = 0; // 0..4095
-#ifndef POT_BITS
-#define POT_BITS 4095
-#endif
-static int readEncoderDelta(){
+// ---------------- Rotary: eine Rastung = eine Aktion ----------------
+#define ENCODER_COUNTS_PER_DETENT 2  // ggf. auf 2 setzen, falls dein Encoder nur 2 Übergänge pro Rastung hat
+
+static int readEncoderNotches(){
+  static bool inited = false;
   static uint8_t prev = 0;
-  uint8_t s = (digitalRead(ROT_CLK) ? 2 : 0) | (digitalRead(ROT_DT) ? 1 : 0);
-  int delta = 0;
-  if ((prev==0b00 && s==0b01) || (prev==0b01 && s==0b11) || (prev==0b11 && s==0b10) || (prev==0b10 && s==0b00)) delta = +1;
-  else if ((prev==0b00 && s==0b10) || (prev==0b10 && s==0b11) || (prev==0b11 && s==0b01) || (prev==0b01 && s==0b00)) delta = -1;
-  prev = s;
-  return delta;
+  static int8_t accum = 0;
+
+  uint8_t curr = (digitalRead(ROT_CLK) ? 2 : 0) | (digitalRead(ROT_DT) ? 1 : 0);
+  if (!inited) { prev = curr; inited = true; return 0; }
+
+  // Quadratur-State-Tabelle (Ben Buxton)
+  static const int8_t dir_table[16] = {
+    0, -1, +1, 0,
+    +1, 0,  0, -1,
+    -1, 0,  0, +1,
+    0, +1, -1, 0
+  };
+
+  int8_t movement = dir_table[(prev << 2) | curr];
+  prev = curr;
+
+  if (movement) {
+    accum += movement; // sammelt Substeps
+    if (accum >= ENCODER_COUNTS_PER_DETENT)  { accum = 0; return +1; }
+    if (accum <= -ENCODER_COUNTS_PER_DETENT) { accum = 0; return -1; }
+  }
+  return 0;
 }
 
 // ---------------- Serial / Globals ----------------
@@ -279,10 +292,17 @@ void setup(){
 }
 
 void loop(){
-  // Encoder -> UI
-  int d = readEncoderDelta();
-  if (d != 0) potEmu = constrain(potEmu + d * 64, 0, POT_BITS);
-  ui_tick(potEmu);
+  // Encoder -> UI: eine Rastung = eine Aktion
+  int notches = readEncoderNotches();
+  if (notches != 0) {
+    UIState st = ui_getState();
+    if (st.screen == UIScreen::EDIT) {
+      ui_nudgeAmount(notches);       // im EDIT: Menge ändern (z. B. ±0.5 g in ui.cpp)
+    } else {
+      ui_nudgeSelection(notches);    // sonst: Auswahl bewegen
+    }
+    Serial.printf("[ENC] notch=%d (screen=%d)\n", notches, (int)st.screen);
+  }
 
   // SERVO-Toggle
   if (edge_falling(BTN_SERVO, &db_servo)) {

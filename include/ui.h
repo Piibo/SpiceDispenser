@@ -31,3 +31,15 @@ void ui_goStart();
 
 void ui_nudgeSelection(int delta);
 void ui_nudgeAmount(int delta);
+
+void ui_renameSelectedSpice(const char* newName);
+
+void ui_showDetail();
+
+bool ui_getSelectedSpiceName(char* out, size_t maxlen);
+
+void ui_startBlinkSelected();
+void ui_stopBlinkSelected();
+
+
+

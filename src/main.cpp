@@ -155,7 +155,7 @@ static void run_cycle_targets_grams(uint32_t& servo_pos_us, const TargetGrams* t
 }
 
 // ---------------- Rotary: eine Rastung = eine Aktion ----------------
-#define ENCODER_COUNTS_PER_DETENT 2  // ggf. auf 2 setzen, falls dein Encoder nur 2 Übergänge pro Rastung hat
+#define ENCODER_COUNTS_PER_DETENT 2
 
 static int readEncoderNotches(){
   static bool inited = false;
@@ -165,7 +165,6 @@ static int readEncoderNotches(){
   uint8_t curr = (digitalRead(ROT_CLK) ? 2 : 0) | (digitalRead(ROT_DT) ? 1 : 0);
   if (!inited) { prev = curr; inited = true; return 0; }
 
-  // Quadratur-State-Tabelle (Ben Buxton)
   static const int8_t dir_table[16] = {
     0, -1, +1, 0,
     +1, 0,  0, -1,
@@ -177,7 +176,7 @@ static int readEncoderNotches(){
   prev = curr;
 
   if (movement) {
-    accum += movement; // sammelt Substeps
+    accum += movement;
     if (accum >= ENCODER_COUNTS_PER_DETENT)  { accum = 0; return +1; }
     if (accum <= -ENCODER_COUNTS_PER_DETENT) { accum = 0; return -1; }
   }
@@ -191,7 +190,7 @@ static uint32_t servo_pos_us = SERVO_BACK_US;
 // ---------------- Voice & Fixed Plan Flows ----------------
 static void startVoiceAndShowResult() {
   Serial.println("[VOICE] startVoiceAndShowResult()");
-  ui_renderVoiceInputScreen(); // „Wir hören zu…“
+  ui_renderVoiceInputScreen();
 
   auto onSending = [](){
     Serial.println("[VOICE] VAD ended -> sending now");
@@ -261,6 +260,91 @@ static void startFixedPlanAndShow(const char* dish) {
   }
 }
 
+static bool showManualSpiceSelection() {
+  // Manuelles "Rezept" aus den belegten Dosen bauen
+  UIRecipe manual;
+  manual.name = "Einzel-Auswahl";
+
+  for (int i = 0; i < pos_count; ++i) {
+    if (spices_map[i][0] == '\0') continue;         // Slot leer
+    manual.spices.push_back(UISpice{ spices_map[i], 0.0 }); // Startmenge 0 g
+  }
+
+  if (manual.spices.empty()) {
+    ui_showAIError("Keine Gewuerze konfiguriert");
+    return false;
+  }
+
+  std::vector<UIRecipe> list;
+  list.push_back(std::move(manual));
+  ui_showAIResult(list);   // öffnet DETAIL-Screen mit Weiter/Zurueck + EDIT
+  return true;
+}
+
+// Deprecation-frei: Name aus AI-Doc holen
+static String extract_spice_name_from_doc(const JsonDocument& doc) {
+  JsonArrayConst arr = doc["spices"].as<JsonArrayConst>();
+  if (!arr.isNull() && arr.size() > 0) {
+    JsonObjectConst sp0 = arr[0].as<JsonObjectConst>();
+    if (!sp0.isNull()) {
+      String n = sp0["name"].as<String>();
+      n.trim();
+      if (n.length() > 0) return n;
+    }
+  }
+  if (doc["dish"].is<String>()) {
+    String n = doc["dish"].as<String>(); n.trim();
+    if (n.length() > 0) return n;
+  }
+  if (doc["title"].is<String>()) {
+    String n = doc["title"].as<String>(); n.trim();
+    if (n.length() > 0) return n;
+  }
+  return "";
+}
+
+// Spracheingabe starten und den selektierten Spice-Namen (nur Name, nicht Gramm)
+// sowie den Slot in spices_map auf den neuen Namen setzen. Danach zurück in DETAIL.
+static void renameSelectedSpiceByVoice() {
+  // Vor Voice den aktuellen Namen der selektierten Zeile merken; wenn Auswahl auf Weiter/Zurück -> abort
+  char oldNameBuf[SPICE_NAME_MAX] = {0};
+  bool haveOld = ui_getSelectedSpiceName(oldNameBuf, sizeof(oldNameBuf));
+  if (!haveOld || strlen(oldNameBuf) == 0) {
+    ui_showDetail();
+    return;
+  }
+
+  // Klassische Voice-Screens zeigen
+  ui_renderVoiceInputScreen();
+  auto onSending = [](){ ui_renderVoiceSendRequestScreen(); };
+
+  JsonDocument doc;
+  if (ai_post_voice("de", 1, "medium", doc, onSending)) {
+    String name = extract_spice_name_from_doc(doc);
+    name.trim(); name.toLowerCase();
+
+    if (name.length() > 0) {
+      // 1) UI-Zeile umbenennen
+      ui_renameSelectedSpice(name.c_str());
+      // 2) Slot im spices_map anpassen (falls alter Slot gefunden)
+      int oldPos = find_pos_by_name(oldNameBuf);
+      if (oldPos >= 0) {
+        spice_set(oldPos, name.c_str());
+        Serial.printf("[VOICE] Slot %d umbenannt: '%s' -> '%s'\n", oldPos+1, oldNameBuf, name.c_str());
+      } else {
+        Serial.printf("[VOICE] alter Slot fuer '%s' nicht gefunden (AI-Resultat-Mode?)\n", oldNameBuf);
+      }
+    } else {
+      Serial.println("[VOICE] kein Name erkannt");
+    }
+  } else {
+    Serial.println("[VOICE] ai_post_voice FAILED");
+  }
+
+  // Immer zurück zur Einzel-Auswahl (DETAIL)
+  ui_showDetail();
+}
+
 void setup(){
   Serial.begin(115200); delay(150);
 
@@ -297,7 +381,7 @@ void loop(){
   if (notches != 0) {
     UIState st = ui_getState();
     if (st.screen == UIScreen::EDIT) {
-      ui_nudgeAmount(notches);       // im EDIT: Menge ändern (z. B. ±0.5 g in ui.cpp)
+      ui_nudgeAmount(notches);       // im EDIT: Menge ändern
     } else {
       ui_nudgeSelection(notches);    // sonst: Auswahl bewegen
     }
@@ -324,15 +408,33 @@ void loop(){
     if (scr == UIScreen::START) {
       if (!voice_busy) {
         voice_busy = true;
-        if (dur >= LONG_PRESS_MS) {
-          startFixedPlanAndShow("chili con carne");
+        UIState st2 = ui_getState(); // 0=AI, 1=Einzel
+        if (st2.selected == 0) {
+          // AI-Gerichtserkennung
+          if (dur >= LONG_PRESS_MS) {
+            startFixedPlanAndShow("chili con carne");
+          } else {
+            startVoiceAndShowResult();
+          }
         } else {
-          startVoiceAndShowResult();
+          // EINZEL-GEWÜRZ: Liste anzeigen + EDIT möglich
+          showManualSpiceSelection();
         }
         voice_busy = false;
       }
     } else {
-      ui_onBtnClick(); // normaler UI-Klick in DETAIL/EDIT
+      // DETAIL: langer Druck = Gewuerz per Voice umbenennen (nur wenn auf einer Gewuerzzeile)
+      UIState st2 = ui_getState();
+      if (st2.screen == UIScreen::DETAIL && dur >= LONG_PRESS_MS) {
+        if (!voice_busy) {
+          voice_busy = true;
+          renameSelectedSpiceByVoice();
+          voice_busy = false;
+        }
+      } else {
+        // kurzer Klick: normales UI-Verhalten (Weiter/Zurueck/Edit)
+        ui_onBtnClick();
+      }
     }
   }
 

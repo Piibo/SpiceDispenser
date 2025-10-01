@@ -17,6 +17,7 @@ static String g_statusLine;
 static bool g_hasPendingConfirm = false;
 static UIRecipe g_pendingRecipe;
 static bool g_voiceRequestPending = false;
+static int g_startSel = 0;
 
 static const uint8_t LINE_H = 10;
 static const uint8_t TOP_MARGIN = 12;
@@ -36,22 +37,6 @@ static inline uint8_t recipeCount() {
 #ifndef POT_BITS
 #define POT_BITS 4095
 #endif
-
-static int mapPotToRange(int potRaw, int maxExclusive) {
-  if (maxExclusive <= 1) return 0;
-  long v = potRaw;
-  long idx = (v * maxExclusive) / (POT_BITS + 1);
-  if (idx < 0) idx = 0;
-  if (idx >= maxExclusive) idx = maxExclusive - 1;
-  return (int)idx;
-}
-
-static double quantizeStepClamped(double x, double step, double maxv) {
-  double q = floor(x / step + 0.5) * step;
-  if (q < 0.0)  q = 0.0;
-  if (q > maxv) q = maxv;
-  return q;
-}
 
 static String fmtAmount(double v) {
   long iv = lround(v);
@@ -73,11 +58,48 @@ static void drawStart() {
   u8g2.clearBuffer();
   drawTitle("Lass uns kochen!", false);
 
-  auto cx = [](U8G2 &d, const char* s){ return (128 - (int)d.getStrWidth(s)) / 2; };
+  // --- Kachel-Layout ---
+  const uint8_t TILE_W   = 56;
+  const uint8_t TILE_H   = 36;
+  const uint8_t TILE_RAD = 4;
+  const uint8_t TILE_GAP = 8;
 
-  u8g2.setFont(FONT_TEXT);
-  u8g2.drawStr(cx(u8g2, "Knopf gedrueckt"), DISPLAY_HEIGHT/2 , "Knopf gedrueckt");
-  u8g2.drawStr(cx(u8g2, "halten"), DISPLAY_HEIGHT/2 +10, "halten");
+  const int totalW = (2 * TILE_W) + TILE_GAP;
+  const int x0 = (128 - totalW) / 2;
+  const int x1 = x0 + TILE_W + TILE_GAP;
+  const int y  = TOP_MARGIN + 4;
+
+  struct Tile { const char* l1; const char* l2; };
+  const Tile tiles[2] = {
+    { "AI-",     "Gericht"    },
+    { "Einzel-", "Gewuerz"    }
+  };
+
+  auto drawTile = [&](int tx, int ty, bool selected, const Tile& t) {
+    if (selected) {
+      u8g2.setDrawColor(1);
+      u8g2.drawRBox(tx, ty, TILE_W, TILE_H, TILE_RAD);
+      u8g2.setDrawColor(0);
+    } else {
+      u8g2.setDrawColor(1);
+      u8g2.drawRFrame(tx, ty, TILE_W, TILE_H, TILE_RAD);
+    }
+
+    u8g2.setFont(FONT_TEXT);
+    auto cx = [&](const char* s){
+      return tx + (TILE_W - (int)u8g2.getStrWidth(s)) / 2;
+    };
+    int textY1 = ty + (TILE_H/2) - 3;
+    int textY2 = textY1 + 10;
+
+    u8g2.drawStr(cx(t.l1), textY1, t.l1);
+    u8g2.drawStr(cx(t.l2), textY2, t.l2);
+
+    if (selected) u8g2.setDrawColor(1);
+  };
+
+  drawTile(x0, y, (g_startSel == 0), tiles[0]);
+  drawTile(x1, y, (g_startSel == 1), tiles[1]);
 
   u8g2.sendBuffer();
 }
@@ -85,9 +107,7 @@ static void drawStart() {
 static void drawRecipeDetail(bool editing) {
   const UIRecipe& recipe = g_recipes[g_selected];
   const int total = (int)recipe.spices.size();
-
-  // Reihenfolge: 0 = Weiter (oben), 1..total = Spices, total+1 = Weiter (unten), total+2 = Zurueck
-  const int Nrows = total + 3;
+  const int Nrows = total + 3; // 0=Weiter, 1..total=Spices, total+1=Weiter, total+2=Zurueck
 
   u8g2.clearBuffer();
   drawTitle(recipe.name.c_str(), true);
@@ -112,17 +132,14 @@ static void drawRecipeDetail(bool editing) {
     else        { u8g2.setDrawColor(1); }
 
     if (i == 0 || i == total + 1) {
-      // "Weiter" (oben UND unten)
       u8g2.setFont(FONT_TEXT);
       u8g2.drawStr(TEXT_X, y, "Weiter");
       drawIcon(IconType::Check, 118, y);
     } else if (i == total + 2) {
-      // "Zurueck" (ganz unten)
       u8g2.setFont(FONT_TEXT);
       u8g2.drawStr(TEXT_X, y, "Zurueck");
       drawIcon(IconType::Left, 118, y);
     } else {
-      // Gewuerz: Index in der Rezeptliste ist i-1
       const UISpice& sp = recipe.spices[i - 1];
       u8g2.setFont(FONT_TEXT);
       u8g2.drawStr(TEXT_X, y, sp.name.c_str());
@@ -136,6 +153,13 @@ static void drawRecipeDetail(bool editing) {
 
   if (start > 0)                 drawIcon(IconType::ChevUp,   122, TOP_MARGIN + 8);
   if (endExclusive < Nrows)      drawIcon(IconType::ChevDown, 122, 64 - 2);
+
+  if (!editing) {
+    u8g2.setDrawColor(1);
+    u8g2.setFont(FONT_TEXT);
+    const char* hint = "Lang druecken: Gewuerz aendern";
+    u8g2.drawStr(TEXT_X, 63, hint);   // links unten; 63 = Baseline kurz vor Display-Ende
+  }
 
   u8g2.sendBuffer();
 }
@@ -221,9 +245,8 @@ void ui_showAIResult(const std::vector<UIRecipe>& recipes) {
     Serial.printf("[UI] first='%s' items=%u\n",
       recipes[0].name.c_str(), (unsigned)recipes[0].spices.size());
 
-  std::vector<UIRecipe> top = recipes;
-  g_recipes  = top;
-  g_selected = clampi(g_selected, 0, (int)recipeCount() - 1);
+  g_recipes = recipes;
+  g_selected = 0;
 
   if (g_recipes.empty() || g_recipes[0].spices.empty()) {
     g_screen = UIScreen::START;
@@ -259,14 +282,14 @@ void ui_setStatusLine(const char* text) {
 void ui_goStart() {
   Serial.println("[UI] goStart -> START");
   g_screen = UIScreen::START;
-  g_selected = 0;
+  g_startSel = 0;
   g_detailTop = 0;
   g_detailSel = 0;
   render();
 }
 
-
-void ui_tick(int potRaw) {
+void ui_tick(int /*potRaw*/) {
+  // (leer im pre-blink Stand)
 }
 
 void ui_onBtnClick() {
@@ -288,18 +311,15 @@ void ui_onBtnClick() {
       const int idxZurueck      = total + 2;
 
       if (g_detailSel == idxWeiterTop || g_detailSel == idxWeiterBottom) {
-        // Bestätigen
         g_pendingRecipe       = g_recipes[g_selected];
         g_hasPendingConfirm   = true;
         ui_setStatusLine("OK");
         return;
       } else if (g_detailSel == idxZurueck) {
-        // Zur Startseite zurück
         g_screen = UIScreen::START;
         render();
         return;
       } else if (g_detailSel >= 1 && g_detailSel <= total) {
-        // Gewürz editieren
         g_screen = UIScreen::EDIT;
         render();
         return;
@@ -314,18 +334,15 @@ void ui_onBtnClick() {
       const int idxZurueck      = total + 2;
 
       if (g_detailSel == idxWeiterTop || g_detailSel == idxWeiterBottom) {
-        // Auch im EDIT: "Weiter" = bestätigen
         g_pendingRecipe       = g_recipes[g_selected];
         g_hasPendingConfirm   = true;
         ui_setStatusLine("OK");
         return;
       } else if (g_detailSel == idxZurueck) {
-        // Zurück in die Detailansicht
         g_screen = UIScreen::DETAIL;
         render();
         return;
       } else {
-        // Klick auf Gewürzzeile im EDIT -> zurück zur Detail (oder behavior nach Wunsch)
         g_screen = UIScreen::DETAIL;
         render();
         return;
@@ -338,8 +355,6 @@ void ui_onBtnClick() {
   }
 }
 
-
-
 void ui_whileBtnPressed() {
   g_screen = UIScreen::VOICE_INPUT;
   g_statusLine = "AI";
@@ -347,7 +362,8 @@ void ui_whileBtnPressed() {
 }
 
 UIState ui_getState() {
-  return UIState{ g_screen, g_selected, g_detailSel };
+  int sel = (g_screen == UIScreen::START) ? g_startSel : g_selected;
+  return UIState{ g_screen, sel, g_detailSel };
 }
 
 bool ui_takeEditedRecipe(UIRecipe& out) {
@@ -361,9 +377,15 @@ bool ui_takeEditedRecipe(UIRecipe& out) {
 void ui_nudgeSelection(int delta) {
   if (delta == 0) return;
 
+  if (g_screen == UIScreen::START) {
+    int newSel = clampi(g_startSel + delta, 0, 1);
+    if (newSel != g_startSel) { g_startSel = newSel; drawStart(); }
+    return;
+  }
+
   if (g_screen == UIScreen::DETAIL || g_screen == UIScreen::EDIT) {
     const int total = (int)g_recipes[g_selected].spices.size();
-    const int Nrows = total + 3; // 0=Weiter(top), 1..total=Spices, total+1=Weiter(bottom), total+2=Zurueck
+    const int Nrows = total + 3;
     int newSel = clampi(g_detailSel + delta, 0, Nrows - 1);
 
     if (newSel != g_detailSel) {
@@ -378,24 +400,18 @@ void ui_nudgeSelection(int delta) {
   }
 }
 
-
 void ui_nudgeAmount(int delta) {
   if (delta == 0) return;
   if (g_screen != UIScreen::EDIT) return;
 
   const int total = (int)g_recipes[g_selected].spices.size();
 
-  // Wegen "Weiter" an Index 0 liegen die Gewürze bei 1..total
   const int spiceIdx = g_detailSel - 1;
-  if (spiceIdx < 0 || spiceIdx >= total) {
-    // Auswahl steht auf "Weiter" (0) oder "Zurueck" (total+1) -> nichts ändern
-    return;
-  }
+  if (spiceIdx < 0 || spiceIdx >= total) return;
 
   UIRecipe& r = g_recipes[g_selected];
   UISpice&  s = r.spices[spiceIdx];
 
-  // ±0.5 g pro Rastung, Klammer 0..9 g
   const double step = 0.5;
   const double minAmt = 0.0;
   const double maxAmt = 9.0;
@@ -410,3 +426,43 @@ void ui_nudgeAmount(int delta) {
   }
 }
 
+// WICHTIG: Modell immer ändern, auch wenn VOICE_* aktiv ist.
+void ui_renameSelectedSpice(const char* newName) {
+  if (!newName || !*newName) return;
+  if (g_recipes.empty()) return;
+  if (g_selected < 0 || g_selected >= (int)g_recipes.size()) return;
+
+  const int total = (int)g_recipes[g_selected].spices.size();
+  const int spiceIdx = g_detailSel - 1; // 1..total
+  if (spiceIdx < 0 || spiceIdx >= total) return;
+
+  g_recipes[g_selected].spices[spiceIdx].name = std::string(newName);
+
+  if (g_screen == UIScreen::DETAIL || g_screen == UIScreen::EDIT) {
+    drawRecipeDetail(g_screen == UIScreen::EDIT);
+  }
+}
+
+bool ui_getSelectedSpiceName(char* out, size_t maxlen) {
+  if (!out || maxlen == 0) return false;
+  if (g_screen != UIScreen::DETAIL && g_screen != UIScreen::EDIT) return false;
+
+  const int total = (int)g_recipes[g_selected].spices.size();
+  const int spiceIdx = g_detailSel - 1;
+  if (spiceIdx < 0 || spiceIdx >= total) return false;
+
+  const std::string& nm = g_recipes[g_selected].spices[spiceIdx].name;
+  strncpy(out, nm.c_str(), maxlen - 1);
+  out[maxlen - 1] = '\0';
+  return true;
+}
+
+void ui_showDetail() {
+  if (g_recipes.empty()) {
+    g_screen = UIScreen::START;
+    render();
+    return;
+  }
+  g_screen = UIScreen::DETAIL;
+  drawRecipeDetail(false);
+}

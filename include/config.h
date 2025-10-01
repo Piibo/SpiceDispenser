@@ -8,9 +8,8 @@ inline constexpr const char* AI_URL    = "http://10.57.144.53:8000/spiceplan";
 inline constexpr const char* AI_HEALTH = "http://10.57.144.53:8000/health";
 
 // --- Mechanik / Geometrie ---
-// Volle 360°-Umdrehung der Trommel in Steps (kalibrieren!)
 // Beispiel: ~88 Steps/Slot bei 5 Slots -> 5 * 88 = 440
-inline constexpr long TRAVEL_STEPS_PER_REV = 440;   // ggf. 400, wenn 80/Slot
+inline constexpr long TRAVEL_STEPS_PER_REV = 440;
 inline constexpr long HOME_OFFSET_STEPS    = 0;     // Feinoffset nach Homing (± wenige Steps)
 
 inline constexpr int  DISPENSE_STEPS_PER_REV = 200; // Dosierschnecke (Steps/Rotation)

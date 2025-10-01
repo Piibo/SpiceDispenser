@@ -363,6 +363,7 @@ void setup(){
   spice_set(1, "pfeffer");
   spice_set(2, "rosmarin");
   spice_set(3, "paprika");
+  spice_set(4, "curry");
 
   db_sel.last_level   = db_sel.stable_level   = digitalRead(BTN_SEL);
   db_servo.last_level = db_servo.stable_level = digitalRead(BTN_SERVO);
@@ -376,19 +377,21 @@ void setup(){
 }
 
 void loop(){
+  ui_tick(0);
+
   // Encoder -> UI: eine Rastung = eine Aktion
   int notches = readEncoderNotches();
   if (notches != 0) {
     UIState st = ui_getState();
     if (st.screen == UIScreen::EDIT) {
-      ui_nudgeAmount(notches);       // im EDIT: Menge ändern
+      ui_nudgeAmount(notches);       // im EDIT: Menge ändern (z. B. ±0.5 g)
     } else {
       ui_nudgeSelection(notches);    // sonst: Auswahl bewegen
     }
     Serial.printf("[ENC] notch=%d (screen=%d)\n", notches, (int)st.screen);
   }
 
-  // SERVO-Toggle
+  // SERVO-Toggle per eigenem Button (falls vorhanden)
   if (edge_falling(BTN_SERVO, &db_servo)) {
     Serial.println("{\"btn\":\"SERVO\",\"event\":\"edge_falling\",\"action\":\"servo_toggle\"}");
     if (servo_pos_us == SERVO_BACK_US) servo_pos_us = mechServoToFront(servo_pos_us);
@@ -405,10 +408,12 @@ void loop(){
     sel_armed = false;
 
     UIScreen scr = ui_getState().screen;
+
     if (scr == UIScreen::START) {
+      // Startscreen: 0 = AI-Gerichtserkennung, 1 = Einzel-Gewuerz
       if (!voice_busy) {
         voice_busy = true;
-        UIState st2 = ui_getState(); // 0=AI, 1=Einzel
+        UIState st2 = ui_getState();
         if (st2.selected == 0) {
           // AI-Gerichtserkennung
           if (dur >= LONG_PRESS_MS) {
@@ -417,13 +422,25 @@ void loop(){
             startVoiceAndShowResult();
           }
         } else {
-          // EINZEL-GEWÜRZ: Liste anzeigen + EDIT möglich
-          showManualSpiceSelection();
+          // EINZEL-GEWÜRZ:
+          if (dur >= LONG_PRESS_MS) {
+            // Langer Druck -> Servo toggeln (wie früherer Button)
+            if (servo_pos_us == SERVO_BACK_US) {
+              servo_pos_us = mechServoToFront(servo_pos_us);
+            } else {
+              servo_pos_us = mechDecoupleBack(servo_pos_us);
+            }
+            Serial.println("[START] Einzel-Gewuerz: Servo toggled");
+          } else {
+            // Kurzer Druck -> Liste/Einzelauswahl anzeigen
+            showManualSpiceSelection();
+          }
         }
         voice_busy = false;
       }
     } else {
-      // DETAIL: langer Druck = Gewuerz per Voice umbenennen (nur wenn auf einer Gewuerzzeile)
+      // Nicht-Startscreen:
+      // DETAIL: langer Druck -> Gewürz per Voice umbenennen (nur auf Gewürzzeile)
       UIState st2 = ui_getState();
       if (st2.screen == UIScreen::DETAIL && dur >= LONG_PRESS_MS) {
         if (!voice_busy) {
@@ -494,3 +511,4 @@ void loop(){
 
   delay(5);
 }
+

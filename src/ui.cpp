@@ -154,11 +154,38 @@ static void drawRecipeDetail(bool editing) {
   if (start > 0)                 drawIcon(IconType::ChevUp,   122, TOP_MARGIN + 8);
   if (endExclusive < Nrows)      drawIcon(IconType::ChevDown, 122, 64 - 2);
 
+  // --- Footer (nur in DETAIL, nicht im EDIT) ---
   if (!editing) {
     u8g2.setDrawColor(1);
     u8g2.setFont(FONT_TEXT);
-    const char* hint = "Lang druecken: Gewuerz aendern";
-    u8g2.drawStr(TEXT_X, 63, hint);   // links unten; 63 = Baseline kurz vor Display-Ende
+
+    // Untere Trennlinie – symmetrisch zur oberen Titel-Linie
+    // 64 = Display-Höhe, LINE_H ~10 → Linie bei ~52px
+    u8g2.drawHLine(0, 64 - LINE_H - 2, 128);
+
+    // unten links anzeigen, mit Icon zwischen den Textteilen
+    const int y = 63;        // Text-Baseline unten
+    const int iconW = 4;     // Breite des Icons (ggf. anpassen)
+    const int gap   = 0;     // kleiner Abstand zwischen Icon und Text
+
+    const char* t1 = "Lang ";
+    const char* t2 = " Gew. aendern";
+
+    int x = TEXT_X;
+    u8g2.setFont(FONT_TEXT);
+    u8g2.setDrawColor(1);
+
+    // 1) erster Textteil
+    u8g2.drawStr(x, y, t1);
+    x += u8g2.getStrWidth(t1);
+
+    // 2) Icon
+    drawIcon(IconType::Right, x, y);
+    x += iconW + gap;
+
+    // 3) zweiter Textteil
+    u8g2.drawStr(x, y, t2);
+
   }
 
   u8g2.sendBuffer();

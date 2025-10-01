@@ -10,9 +10,9 @@ inline constexpr const char* AI_HEALTH = "http://10.57.144.53:8000/health";
 // --- Pins / IO-Timings sind in pins.h bzw. mech.cpp ---
 
 // --- Mechanik / Geometrie ---
-inline constexpr int TRAVEL_STEPS_PER_STOP  = 88;
+inline constexpr int TRAVEL_STEPS_PER_STOP  = 80;
 inline constexpr int DISPENSE_STEPS_PER_REV = 200;
-inline constexpr int POS_COUNT_DEFAULT      = 4;
+inline constexpr int POS_COUNT_DEFAULT      = 5;
 inline constexpr int MAX_POS                = 32;
 inline constexpr int SPICE_NAME_MAX         = 24;
 

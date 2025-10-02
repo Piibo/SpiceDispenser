@@ -10,15 +10,24 @@
 #include "mech.h"
 #include "ai.h"
 #include "ui.h"
+#include "lexicon.h"
+
+// ---------- Forward Declarations (Lexikon/Matching) ----------
+static String normalize_spice(const String& inRaw);
+static int    levenshtein(const String& a, const String& b);
+static bool   findCanonicalSpice(const String& rawIn, String& canonOut);
 
 // ---------------- Button Debounce/Edges ----------------
 struct DebState { uint8_t last_level{1}; uint8_t stable_level{1}; uint8_t stable_count{0}; };
 static DebState db_sel, db_servo;
 
 static bool voice_busy = false;
-static bool sel_armed = false;
+static bool sel_armed  = false;
 static unsigned long sel_down_ms = 0;
 static constexpr unsigned LONG_PRESS_MS = 800;
+
+// Merker: Sind wir in der Einzelliste?
+static bool s_isManualList = false;
 
 // Debounce + Edges
 static int debounce_read(uint8_t pin, DebState* st){
@@ -59,7 +68,7 @@ static int find_pos_by_name(const char *name){
 // ---------------- Targets/Umrechnung ----------------
 struct TargetGrams { int idx; float grams; };
 
-// Robust: direkt aus dem JsonDocument lesen + starke Logs.
+// Robust: direkt aus dem JsonDocument lesen + Logs.
 static void docToUIRecipes(const JsonDocument& doc, const char* title, std::vector<UIRecipe>& out) {
   JsonArrayConst arr = doc["spices"].as<JsonArrayConst>();
   const char* ttl = (title && *title) ? title : (doc["title"] | doc["dish"] | "AI-Rezept");
@@ -74,10 +83,7 @@ static void docToUIRecipes(const JsonDocument& doc, const char* title, std::vect
     uint16_t i = 0;
     for (JsonVariantConst v : arr) {
       JsonObjectConst sp = v.as<JsonObjectConst>();
-      if (sp.isNull()) {
-        Serial.printf("  [CONV] [%u] not an object -> skip\n", i++);
-        continue;
-      }
+      if (sp.isNull()) { Serial.printf("  [CONV] [%u] not an object -> skip\n", i++); continue; }
 
       String nameS = sp["name"].as<String>();
       double grams = 0.0;
@@ -154,9 +160,8 @@ static void run_cycle_targets_grams(uint32_t& servo_pos_us, const TargetGrams* t
   Serial.println("[DONE] Pos1 erreicht, Servo hinten (Park/Start).");
 }
 
-// ---------------- Rotary: eine Rastung = eine Aktion ----------------
+// ---------------- Rotary ----------------
 #define ENCODER_COUNTS_PER_DETENT 2
-
 static int readEncoderNotches(){
   static bool inited = false;
   static uint8_t prev = 0;
@@ -166,10 +171,7 @@ static int readEncoderNotches(){
   if (!inited) { prev = curr; inited = true; return 0; }
 
   static const int8_t dir_table[16] = {
-    0, -1, +1, 0,
-    +1, 0,  0, -1,
-    -1, 0,  0, +1,
-    0, +1, -1, 0
+    0, -1, +1, 0,  +1, 0, 0, -1,  -1, 0, 0, +1,  0, +1, -1, 0
   };
 
   int8_t movement = dir_table[(prev << 2) | curr];
@@ -188,6 +190,7 @@ static String serialCmd;
 static uint32_t servo_pos_us = SERVO_BACK_US;
 
 // ---------------- Voice & Fixed Plan Flows ----------------
+// Gericht per Sprache: VOICE_INPUT -> (onSending) VOICE_SEND -> Ergebnisliste
 static void startVoiceAndShowResult() {
   Serial.println("[VOICE] startVoiceAndShowResult()");
   ui_renderVoiceInputScreen();
@@ -202,24 +205,13 @@ static void startVoiceAndShowResult() {
     Serial.println("[VOICE] ai_post_voice OK");
 
     const char* title = doc["title"] | doc["dish"] | "AI-Rezept";
-    JsonArrayConst spicesDbg = doc["spices"].as<JsonArrayConst>();
-    Serial.printf("[VOICE] title='%s', spices.isNull=%d, spices.size=%u\n",
-                  title, spicesDbg.isNull()?1:0, (unsigned)(spicesDbg.isNull()?0:spicesDbg.size()));
-
     std::vector<UIRecipe> uiRecipes;
     docToUIRecipes(doc, title, uiRecipes);
 
     if (!uiRecipes.empty()) {
-      Serial.printf("[VOICE] UI recipes now=%u, first count=%u\n",
-                    (unsigned)uiRecipes.size(), (unsigned)uiRecipes[0].spices.size());
-      for (size_t k=0; k<uiRecipes[0].spices.size(); ++k) {
-        Serial.printf("  [VOICE/UI] %u: '%s' -> %.3f g\n", (unsigned)k,
-                      uiRecipes[0].spices[k].name.c_str(),
-                      uiRecipes[0].spices[k].amount);
-      }
+      s_isManualList = false;
       ui_showAIResult(uiRecipes);
     } else {
-      Serial.println("[VOICE] UI recipes STILL 0 -> show error");
       ui_showAIError("Keine Gewuerze erkannt");
     }
   } else {
@@ -240,16 +232,11 @@ static void startFixedPlanAndShow(const char* dish) {
     Serial.println("[PLAN] ai_post_plan OK");
 
     const char* title = doc["title"] | doc["dish"] | dish;
-    JsonArrayConst spicesDbg = doc["spices"].as<JsonArrayConst>();
-    Serial.printf("[PLAN] title='%s', spices.isNull=%d, spices.size=%u\n",
-                  title, spicesDbg.isNull()?1:0, (unsigned)(spicesDbg.isNull()?0:spicesDbg.size()));
-
     std::vector<UIRecipe> uiRecipes;
     docToUIRecipes(doc, title, uiRecipes);
 
     if (!uiRecipes.empty()) {
-      Serial.printf("[PLAN] UI recipes now=%u, first count=%u\n",
-                    (unsigned)uiRecipes.size(), (unsigned)uiRecipes[0].spices.size());
+      s_isManualList = false;
       ui_showAIResult(uiRecipes);
     } else {
       ui_showAIError("Keine Gewuerze erkannt");
@@ -261,13 +248,12 @@ static void startFixedPlanAndShow(const char* dish) {
 }
 
 static bool showManualSpiceSelection() {
-  // Manuelles "Rezept" aus den belegten Dosen bauen
   UIRecipe manual;
   manual.name = "Einzel-Auswahl";
 
   for (int i = 0; i < pos_count; ++i) {
-    if (spices_map[i][0] == '\0') continue;         // Slot leer
-    manual.spices.push_back(UISpice{ spices_map[i], 0.0 }); // Startmenge 0 g
+    if (spices_map[i][0] == '\0') continue;
+    manual.spices.push_back(UISpice{ spices_map[i], 0.0 });
   }
 
   if (manual.spices.empty()) {
@@ -277,11 +263,12 @@ static bool showManualSpiceSelection() {
 
   std::vector<UIRecipe> list;
   list.push_back(std::move(manual));
-  ui_showAIResult(list);   // öffnet DETAIL-Screen mit Weiter/Zurueck + EDIT
+  s_isManualList = true;
+  ui_showAIResult(list);
   return true;
 }
 
-// Deprecation-frei: Name aus AI-Doc holen
+// Name aus AI-Doc holen (spices[0].name -> dish -> title)
 static String extract_spice_name_from_doc(const JsonDocument& doc) {
   JsonArrayConst arr = doc["spices"].as<JsonArrayConst>();
   if (!arr.isNull() && arr.size() > 0) {
@@ -292,57 +279,98 @@ static String extract_spice_name_from_doc(const JsonDocument& doc) {
       if (n.length() > 0) return n;
     }
   }
-  if (doc["dish"].is<String>()) {
-    String n = doc["dish"].as<String>(); n.trim();
-    if (n.length() > 0) return n;
-  }
-  if (doc["title"].is<String>()) {
-    String n = doc["title"].as<String>(); n.trim();
-    if (n.length() > 0) return n;
-  }
+  if (doc["dish"].is<String>())   { String n = doc["dish"].as<String>();  n.trim(); if (n.length() > 0) return n; }
+  if (doc["title"].is<String>())  { String n = doc["title"].as<String>(); n.trim(); if (n.length() > 0) return n; }
   return "";
 }
 
-// Spracheingabe starten und den selektierten Spice-Namen (nur Name, nicht Gramm)
-// sowie den Slot in spices_map auf den neuen Namen setzen. Danach zurück in DETAIL.
+// --- Whitelist-/Fuzzy-Matching ---
+static String normalize_spice(const String& inRaw) {
+  String s = inRaw;
+  s.trim(); s.toLowerCase();
+  s.replace("ä","ae"); s.replace("ö","oe"); s.replace("ü","ue"); s.replace("ß","ss");
+  String out; out.reserve(s.length());
+  for (size_t i=0; i<s.length(); ++i) {
+    char c = s.charAt(i);
+    if ((c>='a'&&c<='z') || (c>='0'&&c<='9') || c==' ') out += c;
+  }
+  while (out.indexOf("  ") >= 0) out.replace("  ", " ");
+  out.trim();
+  return out;
+}
+static int levenshtein(const String& a, const String& b) {
+  const int n = a.length(), m = b.length();
+  if (n==0) return m;
+  if (m==0) return n;
+  std::vector<int> prev(m+1), curr(m+1);
+  for (int j=0; j<=m; ++j) prev[j] = j;
+  for (int i=1; i<=n; ++i) {
+    curr[0] = i;
+    for (int j=1; j<=m; ++j) {
+      int cost = (a.charAt(i-1)==b.charAt(j-1)) ? 0 : 1;
+      int del  = prev[j]   + 1;
+      int ins  = curr[j-1] + 1;
+      int sub  = prev[j-1] + cost;
+      curr[j] = min(del, min(ins, sub));
+    }
+    prev.swap(curr);
+  }
+  return prev[m];
+}
+static bool findCanonicalSpice(const String& rawIn, String& canonOut) {
+  String q = normalize_spice(rawIn);
+  if (q.length()==0) return false;
+
+  for (size_t i=0; i<SPICE_LEXICON_COUNT; ++i) {
+    String cand = normalize_spice(String(SPICE_LEXICON[i]));
+    if (cand == q) { canonOut = String(SPICE_LEXICON[i]); return true; }
+  }
+  for (size_t i=0; i<SPICE_LEXICON_COUNT; ++i) {
+    String cand = normalize_spice(String(SPICE_LEXICON[i]));
+    if (q.indexOf(cand) >= 0 || cand.indexOf(q) >= 0) { canonOut = String(SPICE_LEXICON[i]); return true; }
+  }
+  int bestIdx = -1, bestDist = 9999;
+  for (size_t i=0; i<SPICE_LEXICON_COUNT; ++i) {
+    String cand = normalize_spice(String(SPICE_LEXICON[i]));
+    int d = levenshtein(q, cand);
+    if (d < bestDist) { bestDist = d; bestIdx = (int)i; }
+  }
+  int limit = (q.length() <= 5) ? 1 : (q.length() <= 10 ? 2 : 3);
+  if (bestIdx >= 0 && bestDist <= limit) { canonOut = String(SPICE_LEXICON[bestIdx]); return true; }
+  return false;
+}
+
+// Voice-Umbenennen des selektierten Gewürzes (nur der Name); nur in Einzelliste
 static void renameSelectedSpiceByVoice() {
-  // Vor Voice den aktuellen Namen der selektierten Zeile merken; wenn Auswahl auf Weiter/Zurück -> abort
+  if (!s_isManualList) { ui_showDetail(); return; }
+
   char oldNameBuf[SPICE_NAME_MAX] = {0};
-  bool haveOld = ui_getSelectedSpiceName(oldNameBuf, sizeof(oldNameBuf));
-  if (!haveOld || strlen(oldNameBuf) == 0) {
+  if (!ui_getSelectedSpiceName(oldNameBuf, sizeof(oldNameBuf)) || strlen(oldNameBuf) == 0) {
     ui_showDetail();
     return;
   }
 
-  // Klassische Voice-Screens zeigen
-  ui_renderVoiceInputScreen();
-  auto onSending = [](){ ui_renderVoiceSendRequestScreen(); };
+  ui_renderVoiceInputScreen(); // Aufnahme
+  auto onSending = [](){ ui_renderVoiceSendRequestScreen(); }; // Senden
 
   JsonDocument doc;
   if (ai_post_voice("de", 1, "medium", doc, onSending)) {
     String name = extract_spice_name_from_doc(doc);
-    name.trim(); name.toLowerCase();
+    name.trim();
 
-    if (name.length() > 0) {
-      // 1) UI-Zeile umbenennen
-      ui_renameSelectedSpice(name.c_str());
-      // 2) Slot im spices_map anpassen (falls alter Slot gefunden)
+    String canon;
+    if (findCanonicalSpice(name, canon)) {
+      ui_renameSelectedSpice(canon.c_str());
       int oldPos = find_pos_by_name(oldNameBuf);
-      if (oldPos >= 0) {
-        spice_set(oldPos, name.c_str());
-        Serial.printf("[VOICE] Slot %d umbenannt: '%s' -> '%s'\n", oldPos+1, oldNameBuf, name.c_str());
-      } else {
-        Serial.printf("[VOICE] alter Slot fuer '%s' nicht gefunden (AI-Resultat-Mode?)\n", oldNameBuf);
-      }
+      if (oldPos >= 0) { spice_set(oldPos, canon.c_str()); }
     } else {
-      Serial.println("[VOICE] kein Name erkannt");
+      Serial.printf("[VOICE] '%s' ist kein erlaubtes Gewuerz -> abgelehnt\n", name.c_str());
     }
   } else {
     Serial.println("[VOICE] ai_post_voice FAILED");
   }
 
-  // Immer zurück zur Einzel-Auswahl (DETAIL)
-  ui_showDetail();
+  ui_showDetail(); // zurück zur Liste
 }
 
 void setup(){
@@ -358,7 +386,6 @@ void setup(){
   pos_count = POS_COUNT_DEFAULT;
 
   spice_clear_all();
-  // Layout anpassen:
   spice_set(0, "salz");
   spice_set(1, "pfeffer");
   spice_set(2, "rosmarin");
@@ -379,26 +406,20 @@ void setup(){
 void loop(){
   ui_tick(0);
 
-  // Encoder -> UI: eine Rastung = eine Aktion
   int notches = readEncoderNotches();
   if (notches != 0) {
     UIState st = ui_getState();
-    if (st.screen == UIScreen::EDIT) {
-      ui_nudgeAmount(notches);       // im EDIT: Menge ändern (z. B. ±0.5 g)
-    } else {
-      ui_nudgeSelection(notches);    // sonst: Auswahl bewegen
-    }
+    if (st.screen == UIScreen::EDIT) ui_nudgeAmount(notches);
+    else                             ui_nudgeSelection(notches);
     Serial.printf("[ENC] notch=%d (screen=%d)\n", notches, (int)st.screen);
   }
 
-  // SERVO-Toggle per eigenem Button (falls vorhanden)
   if (edge_falling(BTN_SERVO, &db_servo)) {
     Serial.println("{\"btn\":\"SERVO\",\"event\":\"edge_falling\",\"action\":\"servo_toggle\"}");
     if (servo_pos_us == SERVO_BACK_US) servo_pos_us = mechServoToFront(servo_pos_us);
     else                               servo_pos_us = mechDecoupleBack(servo_pos_us);
   }
 
-  // SEL press-duration handling (falling-only + Dauer)
   if (edge_falling(BTN_SEL, &db_sel)) {
     sel_armed = true;
     sel_down_ms = millis();
@@ -410,46 +431,32 @@ void loop(){
     UIScreen scr = ui_getState().screen;
 
     if (scr == UIScreen::START) {
-      // Startscreen: 0 = AI-Gerichtserkennung, 1 = Einzel-Gewuerz
       if (!voice_busy) {
         voice_busy = true;
         UIState st2 = ui_getState();
         if (st2.selected == 0) {
-          // AI-Gerichtserkennung
-          if (dur >= LONG_PRESS_MS) {
-            startFixedPlanAndShow("chili con carne");
-          } else {
-            startVoiceAndShowResult();
-          }
+          if (dur >= LONG_PRESS_MS) startFixedPlanAndShow("chili con carne");
+          else                      startVoiceAndShowResult();
         } else {
-          // EINZEL-GEWÜRZ:
           if (dur >= LONG_PRESS_MS) {
-            // Langer Druck -> Servo toggeln (wie früherer Button)
-            if (servo_pos_us == SERVO_BACK_US) {
-              servo_pos_us = mechServoToFront(servo_pos_us);
-            } else {
-              servo_pos_us = mechDecoupleBack(servo_pos_us);
-            }
+            if (servo_pos_us == SERVO_BACK_US) servo_pos_us = mechServoToFront(servo_pos_us);
+            else                               servo_pos_us = mechDecoupleBack(servo_pos_us);
             Serial.println("[START] Einzel-Gewuerz: Servo toggled");
           } else {
-            // Kurzer Druck -> Liste/Einzelauswahl anzeigen
             showManualSpiceSelection();
           }
         }
         voice_busy = false;
       }
     } else {
-      // Nicht-Startscreen:
-      // DETAIL: langer Druck -> Gewürz per Voice umbenennen (nur auf Gewürzzeile)
       UIState st2 = ui_getState();
-      if (st2.screen == UIScreen::DETAIL && dur >= LONG_PRESS_MS) {
+      if (st2.screen == UIScreen::DETAIL && dur >= LONG_PRESS_MS && s_isManualList) {
         if (!voice_busy) {
           voice_busy = true;
           renameSelectedSpiceByVoice();
           voice_busy = false;
         }
       } else {
-        // kurzer Klick: normales UI-Verhalten (Weiter/Zurueck/Edit)
         ui_onBtnClick();
       }
     }
@@ -469,8 +476,10 @@ void loop(){
             std::vector<UIRecipe> uiRecipes;
             const char* title = doc["title"] | doc["dish"] | "AI-Rezept";
             docToUIRecipes(doc, title, uiRecipes);
-            if (!uiRecipes.empty()) ui_showAIResult(uiRecipes);
-            else ui_showAIError("Keine Gewuerze erkannt");
+            if (!uiRecipes.empty()) {
+              s_isManualList = false;
+              ui_showAIResult(uiRecipes);
+            } else ui_showAIError("Keine Gewuerze erkannt");
           } else {
             ui_showAIError("AI-Fehler");
           }
@@ -483,7 +492,7 @@ void loop(){
     }
   }
 
-  // Nach „OK/Weiter“ aus der UI dosieren
+  // Nach „OK/Weiter“ dosieren
   UIRecipe edited;
   if (ui_takeEditedRecipe(edited)) {
     Serial.printf("[UI] confirm -> recipe='%s' items=%u\n",
@@ -504,6 +513,7 @@ void loop(){
       run_cycle_targets_grams(servo_pos_us, tg, n);
       Serial.println("[MECH] end run_cycle_targets_grams()");
       ui_goStart();
+      s_isManualList = false;
     } else {
       Serial.println("{\"status\":\"noop\"}");
     }
@@ -511,4 +521,3 @@ void loop(){
 
   delay(5);
 }
-

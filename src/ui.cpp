@@ -6,19 +6,18 @@
 #include "icons.h"
 #include <cmath>
 
+// ---- interner UI-Status ----
 static std::vector<UIRecipe> g_recipes;
 static UIScreen g_screen = UIScreen::START;
-static int g_selected = 0;
-static int g_detailTop = 0;
-static int g_detailSel = 0;
-static double g_potFiltered = 0.0;
-static const float POT_ALPHA = 0.2f;
-static String g_statusLine;
+static int g_selected = 0;    // Rezeptindex (oder Kachelindex im START)
+static int g_detailTop = 0;   // Scroll-Offset in Detail/Edit
+static int g_detailSel = 0;   // Cursor-Zeile in Detail/Edit
+static String g_statusLine;   // optional; wird nicht eigens gezeichnet
 static bool g_hasPendingConfirm = false;
 static UIRecipe g_pendingRecipe;
-static bool g_voiceRequestPending = false;
-static int g_startSel = 0;
+static int g_startSel = 0;    // 0=AI-Gericht, 1=Einzel-Gewuerz
 
+// Layout-Konstanten
 static const uint8_t LINE_H = 10;
 static const uint8_t TOP_MARGIN = 12;
 static const uint8_t ITEMS_PER_PAGE = 4;
@@ -26,7 +25,8 @@ static const uint8_t TEXT_X = 4;
 static const uint8_t TITLE_PAD_X = 4;
 
 U8G2_SSD1309_128X64_NONAME0_F_4W_SW_SPI u8g2(
-  U8G2_R0, OLED_CLK, OLED_MOSI, OLED_CS, OLED_DC, OLED_RST);
+  U8G2_R0, OLED_CLK, OLED_MOSI, OLED_CS, OLED_DC, OLED_RST
+);
 
 static inline int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
 static inline uint8_t recipeCount() {
@@ -34,18 +34,7 @@ static inline uint8_t recipeCount() {
   return n > 255 ? 255 : static_cast<uint8_t>(n);
 }
 
-#ifndef POT_BITS
-#define POT_BITS 4095
-#endif
-
-static String fmtAmount(double v) {
-  long iv = lround(v);
-  if (fabs(v - iv) < 0.05) return String(iv);
-  char buf[16];
-  dtostrf(v, 0, 1, buf);
-  return String(buf);
-}
-
+// --------- Title / Header ----------
 static void drawTitle(const char* title, bool /*showBack*/) {
   u8g2.setDrawColor(1);
   u8g2.setFont(FONT_TEXT);
@@ -54,11 +43,11 @@ static void drawTitle(const char* title, bool /*showBack*/) {
   u8g2.setFont(FONT_TEXT);
 }
 
+// --------- START (Kacheln) ----------
 static void drawStart() {
   u8g2.clearBuffer();
   drawTitle("Lass uns kochen!", false);
 
-  // --- Kachel-Layout ---
   const uint8_t TILE_W   = 56;
   const uint8_t TILE_H   = 36;
   const uint8_t TILE_RAD = 4;
@@ -71,8 +60,8 @@ static void drawStart() {
 
   struct Tile { const char* l1; const char* l2; };
   const Tile tiles[2] = {
-    { "AI-",     "Gericht"    },
-    { "Einzel-", "Gewuerz"    }
+    { "AI-",     "Gericht" },
+    { "Einzel-", "Gewuerz" }
   };
 
   auto drawTile = [&](int tx, int ty, bool selected, const Tile& t) {
@@ -86,15 +75,12 @@ static void drawStart() {
     }
 
     u8g2.setFont(FONT_TEXT);
-    auto cx = [&](const char* s){
-      return tx + (TILE_W - (int)u8g2.getStrWidth(s)) / 2;
-    };
+    auto cx = [&](const char* s){ return tx + (TILE_W - (int)u8g2.getStrWidth(s)) / 2; };
     int textY1 = ty + (TILE_H/2) - 3;
     int textY2 = textY1 + 10;
 
     u8g2.drawStr(cx(t.l1), textY1, t.l1);
     u8g2.drawStr(cx(t.l2), textY2, t.l2);
-
     if (selected) u8g2.setDrawColor(1);
   };
 
@@ -104,10 +90,20 @@ static void drawStart() {
   u8g2.sendBuffer();
 }
 
+// --------- DETAIL/EDIT-Liste ----------
+static String fmtAmount(double v) {
+  long iv = lround(v);
+  if (fabs(v - iv) < 0.05) return String(iv);
+  char buf[16];
+  dtostrf(v, 0, 1, buf);
+  return String(buf);
+}
+
 static void drawRecipeDetail(bool editing) {
+  (void)editing;
   const UIRecipe& recipe = g_recipes[g_selected];
   const int total = (int)recipe.spices.size();
-  const int Nrows = total + 3; // 0=Weiter, 1..total=Spices, total+1=Weiter, total+2=Zurueck
+  const int Nrows = total + 3; // Weiter(oben) + Spices + Weiter(unten) + Zurueck
 
   u8g2.clearBuffer();
   drawTitle(recipe.name.c_str(), true);
@@ -128,8 +124,12 @@ static void drawRecipeDetail(bool editing) {
     uint8_t y = TOP_MARGIN + 1 + line * LINE_H + 8;
     bool isSel = (i == g_detailSel);
 
-    if (isSel) { u8g2.drawBox(0, TOP_MARGIN + line * LINE_H, 128, LINE_H); u8g2.setDrawColor(0); }
-    else        { u8g2.setDrawColor(1); }
+    if (isSel) {
+      u8g2.drawBox(0, TOP_MARGIN + line * LINE_H, 128, LINE_H);
+      u8g2.setDrawColor(0);
+    } else {
+      u8g2.setDrawColor(1);
+    }
 
     if (i == 0 || i == total + 1) {
       u8g2.setFont(FONT_TEXT);
@@ -154,47 +154,14 @@ static void drawRecipeDetail(bool editing) {
   if (start > 0)                 drawIcon(IconType::ChevUp,   122, TOP_MARGIN + 8);
   if (endExclusive < Nrows)      drawIcon(IconType::ChevDown, 122, 64 - 2);
 
-  // --- Footer (nur in DETAIL, nicht im EDIT) ---
-  if (!editing) {
-    u8g2.setDrawColor(1);
-    u8g2.setFont(FONT_TEXT);
-
-    // Untere Trennlinie – symmetrisch zur oberen Titel-Linie
-    // 64 = Display-Höhe, LINE_H ~10 → Linie bei ~52px
-    u8g2.drawHLine(0, 64 - LINE_H - 2, 128);
-
-    // unten links anzeigen, mit Icon zwischen den Textteilen
-    const int y = 63;        // Text-Baseline unten
-    const int iconW = 4;     // Breite des Icons (ggf. anpassen)
-    const int gap   = 0;     // kleiner Abstand zwischen Icon und Text
-
-    const char* t1 = "Lang ";
-    const char* t2 = " Gew. aendern";
-
-    int x = TEXT_X;
-    u8g2.setFont(FONT_TEXT);
-    u8g2.setDrawColor(1);
-
-    // 1) erster Textteil
-    u8g2.drawStr(x, y, t1);
-    x += u8g2.getStrWidth(t1);
-
-    // 2) Icon
-    drawIcon(IconType::Right, x, y);
-    x += iconW + gap;
-
-    // 3) zweiter Textteil
-    u8g2.drawStr(x, y, t2);
-
-  }
-
   u8g2.sendBuffer();
 }
 
+// --------- Voice Screens ----------
 static void drawVoiceInput() {
   u8g2.clearBuffer();
-  int xPos = DISPLAY_WIDTH/2;
-  int yPos = DISPLAY_HEIGHT/2;
+  int xPos = 128/2;
+  int yPos = 64/2;
   drawIcon(IconType::Microphone, xPos - 5,  yPos);
 
   auto centerX = [](const char* s) -> int {
@@ -202,15 +169,14 @@ static void drawVoiceInput() {
   };
   u8g2.setFont(FONT_TEXT);
   u8g2.drawStr(centerX("Was moechtest du"), yPos + 10 , "Was moechtest du");
-  u8g2.drawStr(centerX("essen?"), yPos + 20, "essen?");
-
+  u8g2.drawStr(centerX("essen?"),           yPos + 20 , "essen?");
   u8g2.sendBuffer();
 }
 
 static void drawSendRequest() {
   u8g2.clearBuffer();
-  int xPos = DISPLAY_WIDTH/2;
-  int yPos = DISPLAY_HEIGHT/2;
+  int xPos = 128/2;
+  int yPos = 64/2;
   drawIcon(IconType::Microphone, xPos - 5,  yPos);
 
   auto centerX = [](const char* s) -> int {
@@ -218,39 +184,36 @@ static void drawSendRequest() {
   };
   u8g2.setFont(FONT_TEXT);
   u8g2.drawStr(centerX("Sende Anfrage"), yPos + 10 , "Sende Anfrage");
-  u8g2.drawStr(centerX("an AI..."), yPos + 20, "an AI...");
-
+  u8g2.drawStr(centerX("an AI..."),      yPos + 20 , "an AI...");
   u8g2.sendBuffer();
 }
 
+// --------- Top-Level Render ----------
 static void render() {
   switch (g_screen) {
-    case UIScreen::START:       drawStart(); break;
+    case UIScreen::START:       drawStart();        break;
     case UIScreen::DETAIL:      drawRecipeDetail(false); break;
     case UIScreen::EDIT:        drawRecipeDetail(true);  break;
-    case UIScreen::VOICE_INPUT: drawVoiceInput();        break;
-    case UIScreen::VOICE_SEND:  drawSendRequest();       break;
+    case UIScreen::VOICE_INPUT: drawVoiceInput();   break;
+    case UIScreen::VOICE_SEND:  drawSendRequest();  break;
   }
 }
 
+// --------- Public API ----------
 void ui_renderVoiceInputScreen() {
-  Serial.println("[UI] render VOICE_INPUT");
   g_screen = UIScreen::VOICE_INPUT;
   render();
 }
 void ui_renderVoiceSendRequestScreen() {
-  Serial.println("[UI] render VOICE_SEND");
   g_screen = UIScreen::VOICE_SEND;
   render();
 }
 
 void ui_init() {
-  Serial.println("[UI] init()");
   u8g2.begin();
   u8g2.setPowerSave(0);
   u8g2.setContrast(255);
 
-  g_potFiltered = 0;
   g_screen = UIScreen::START;
   g_selected = 0;
   g_detailTop = 0;
@@ -260,18 +223,7 @@ void ui_init() {
   render();
 }
 
-bool ui_takeVoiceRequest() {
-  if (!g_voiceRequestPending) return false;
-  g_voiceRequestPending = false;
-  return true;
-}
-
 void ui_showAIResult(const std::vector<UIRecipe>& recipes) {
-  Serial.printf("[UI] showAIResult: recipes=%u\n", (unsigned)recipes.size());
-  if (!recipes.empty())
-    Serial.printf("[UI] first='%s' items=%u\n",
-      recipes[0].name.c_str(), (unsigned)recipes[0].spices.size());
-
   g_recipes = recipes;
   g_selected = 0;
 
@@ -289,7 +241,6 @@ void ui_showAIResult(const std::vector<UIRecipe>& recipes) {
 }
 
 void ui_showAIError(const char* msg) {
-  Serial.printf("[UI] showAIError: %s\n", msg ? msg : "(null)");
   g_screen = UIScreen::START;
   g_statusLine = msg ? msg : "AI-Fehler";
   render();
@@ -307,7 +258,6 @@ void ui_setStatusLine(const char* text) {
 }
 
 void ui_goStart() {
-  Serial.println("[UI] goStart -> START");
   g_screen = UIScreen::START;
   g_startSel = 0;
   g_detailTop = 0;
@@ -315,8 +265,14 @@ void ui_goStart() {
   render();
 }
 
+void ui_showDetail() {
+  if (g_recipes.empty()) { g_screen = UIScreen::START; render(); return; }
+  g_screen = UIScreen::DETAIL;
+  drawRecipeDetail(false);
+}
+
 void ui_tick(int /*potRaw*/) {
-  // (leer im pre-blink Stand)
+  // kein Blink, keine extra Animation
 }
 
 void ui_onBtnClick() {
@@ -338,8 +294,8 @@ void ui_onBtnClick() {
       const int idxZurueck      = total + 2;
 
       if (g_detailSel == idxWeiterTop || g_detailSel == idxWeiterBottom) {
-        g_pendingRecipe       = g_recipes[g_selected];
-        g_hasPendingConfirm   = true;
+        g_pendingRecipe     = g_recipes[g_selected];
+        g_hasPendingConfirm = true;
         ui_setStatusLine("OK");
         return;
       } else if (g_detailSel == idxZurueck) {
@@ -361,8 +317,8 @@ void ui_onBtnClick() {
       const int idxZurueck      = total + 2;
 
       if (g_detailSel == idxWeiterTop || g_detailSel == idxWeiterBottom) {
-        g_pendingRecipe       = g_recipes[g_selected];
-        g_hasPendingConfirm   = true;
+        g_pendingRecipe     = g_recipes[g_selected];
+        g_hasPendingConfirm = true;
         ui_setStatusLine("OK");
         return;
       } else if (g_detailSel == idxZurueck) {
@@ -380,12 +336,6 @@ void ui_onBtnClick() {
       render();
       return;
   }
-}
-
-void ui_whileBtnPressed() {
-  g_screen = UIScreen::VOICE_INPUT;
-  g_statusLine = "AI";
-  render();
 }
 
 UIState ui_getState() {
@@ -417,11 +367,9 @@ void ui_nudgeSelection(int delta) {
 
     if (newSel != g_detailSel) {
       g_detailSel = newSel;
-
       int desiredTop = g_detailSel - (ITEMS_PER_PAGE / 2);
       desiredTop = clampi(desiredTop, 0, max(0, Nrows - (int)ITEMS_PER_PAGE));
       if (desiredTop != g_detailTop) g_detailTop = desiredTop;
-
       drawRecipeDetail(g_screen == UIScreen::EDIT);
     }
   }
@@ -432,8 +380,8 @@ void ui_nudgeAmount(int delta) {
   if (g_screen != UIScreen::EDIT) return;
 
   const int total = (int)g_recipes[g_selected].spices.size();
+  const int spiceIdx = g_detailSel - 1; // 1..total
 
-  const int spiceIdx = g_detailSel - 1;
   if (spiceIdx < 0 || spiceIdx >= total) return;
 
   UIRecipe& r = g_recipes[g_selected];
@@ -453,7 +401,6 @@ void ui_nudgeAmount(int delta) {
   }
 }
 
-// WICHTIG: Modell immer ändern, auch wenn VOICE_* aktiv ist.
 void ui_renameSelectedSpice(const char* newName) {
   if (!newName || !*newName) return;
   if (g_recipes.empty()) return;
@@ -482,14 +429,4 @@ bool ui_getSelectedSpiceName(char* out, size_t maxlen) {
   strncpy(out, nm.c_str(), maxlen - 1);
   out[maxlen - 1] = '\0';
   return true;
-}
-
-void ui_showDetail() {
-  if (g_recipes.empty()) {
-    g_screen = UIScreen::START;
-    render();
-    return;
-  }
-  g_screen = UIScreen::DETAIL;
-  drawRecipeDetail(false);
 }

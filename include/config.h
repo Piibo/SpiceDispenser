@@ -9,7 +9,7 @@ inline constexpr const char* AI_HEALTH = "http://10.57.144.53:8000/health";
 
 // --- Mechanik / Geometrie ---
 // Beispiel: ~88 Steps/Slot bei 5 Slots -> 5 * 88 = 440
-inline constexpr long TRAVEL_STEPS_PER_REV = 440;
+inline constexpr long TRAVEL_STEPS_PER_REV = 438;
 inline constexpr long HOME_OFFSET_STEPS    = 0;     // Feinoffset nach Homing (± wenige Steps)
 
 inline constexpr int  DISPENSE_STEPS_PER_REV = 200; // Dosierschnecke (Steps/Rotation)

@@ -16,6 +16,8 @@ static String g_statusLine;   // optional; wird nicht eigens gezeichnet
 static bool g_hasPendingConfirm = false;
 static UIRecipe g_pendingRecipe;
 static int g_startSel = 0;    // 0=AI-Gericht, 1=Einzel-Gewuerz
+static bool g_showManualHint = false;
+
 
 // Layout-Konstanten
 static const uint8_t LINE_H = 10;
@@ -183,8 +185,8 @@ static void drawSendRequest() {
     return (128 - (int)u8g2.getStrWidth(s)) / 2;
   };
   u8g2.setFont(FONT_TEXT);
-  u8g2.drawStr(centerX("Sende Anfrage"), yPos + 10 , "Sende Anfrage");
-  u8g2.drawStr(centerX("an AI..."),      yPos + 20 , "an AI...");
+  u8g2.drawStr(centerX("Jetzt"), yPos + 10 , "Jetzt");
+  u8g2.drawStr(centerX("Sprechen"),      yPos + 20 , "Sprechen");
   u8g2.sendBuffer();
 }
 

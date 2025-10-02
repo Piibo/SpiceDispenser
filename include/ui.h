@@ -48,3 +48,5 @@ void ui_nudgeAmount(int delta);
 // Hilfen für Rename
 void ui_renameSelectedSpice(const char* newName);
 bool ui_getSelectedSpiceName(char* out, size_t maxlen);
+
+void ui_setManualHintEnabled(bool on);

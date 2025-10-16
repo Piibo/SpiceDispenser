@@ -1,1 +1,10 @@
+# --- Core ---
+requests
 pyserial
+numpy
+
+# --- Speech recognition ---
+sounddevice
+webrtcvad
+faster-whisper
+

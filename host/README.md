@@ -1,57 +1,154 @@
-# Spice Extractor v2
+# SpiceDispenser – Host AI Service
 
-Ein Python-Tool, das aus einem Gerichtsnamen die typischen **Gewürze** extrahiert – robust, sprachsensibel und mit Wikipedia-Plausibilitätscheck.
+Local Python backend used by the ESP32 firmware.  
+Provides HTTP endpoints to create spice plans from a dish name and (optionally) via local speech recognition.
 
-## Features
+## Files
 
-- **Wikipedia-Check (DE/EN):** prüft, ob es sich um ein echtes Gericht handelt, ignoriert Disambiguation.
-- **LLM-Anbindung (Ollama, z. B. Mistral):** erzeugt eine reine JSON-Liste mit typischen Gewürzen.
-- **Synonym-Normalisierung:** wandelt Schreibweisen & Synonyme in deutsche Standardformen um.
-- **Robust gegen Halluzinationen:** Fallback-Modus, wenn LLM kein valides JSON liefert.
-- **CLI mit Optionen:** Standardausgabe oder reine JSON-Liste (`--json-only`).
+- `ai_host.py` – HTTP API server (expects requests from the ESP32)
+- `speech_input.py` – helper to capture and transcribe one utterance via microphone (used by the server for `/voiceplan` if configured)
+- `requirements.txt` – Python dependencies
 
-## Installation
-
-```bash
-pip install requests
-```
-
-## Nutzung
+## Install
 
 ```bash
-# Standard
-python3 spice_extractor_v2.py "chili con carne"
+python -m venv .venv
+# Windows:
+.venv\Scripts\activate
+# macOS/Linux:
+# source .venv/bin/activate
 
-# Nur JSON-Liste
-python3 spice_extractor_v2.py --json-only "pho bo"
-
-# Mit Debug-Ausgabe
-SPICE_DEBUG=1 python3 spice_extractor_v2.py "ratatouille"
+pip install -r requirements.txt
 ```
 
-## Voraussetzungen
-
-- Python 3.8+
-- [Ollama](https://ollama.ai/) installiert und Modell lokal verfügbar (Default: `mistral`).
-
-## Beispielausgabe
+## Run the server
 
 ```bash
-== Gericht ==
-chili con carne
-== Gewürze ==
-chili, paprika, pfeffer, kreuzkümmel
-
-JSON: ["chili", "paprika", "pfeffer", "kreuzkümmel"]
+# Simple (builtin uvicorn)
+uvicorn ai_host:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-## Erweiterungsmöglichkeiten
+The ESP32 should point to:
 
-- **Synonym-Liste auslagern:** externe JSON-/YAML-Datei zur leichteren Pflege.
-- **Multi-Language-Support:** zusätzliche Wikipedia-Sprachen (FR, ES …).
-- **Testsuite:** Unit-Tests für Parser, Normalisierung und Wikipedia-Check.
-- **Spice-Lexikon:** optionales Whitelisting für eine kontrollierte Gewürzliste.
+```
+AI_URL    = http://<HOST-IP>:8000/spiceplan
+AI_HEALTH = http://<HOST-IP>:8000/health
+```
+
+> Replace `<HOST-IP>` with your computer’s LAN IP.
 
 ---
 
-✦ Entwickelt für Projekte, die kulinarische Daten weiterverarbeiten wollen (z. B. Rezeptanalyse, Küchen-Chatbots, Food-NLP).
+## Endpoints
+
+### `GET /health`
+
+Health check.
+
+**Response (200):**
+
+```json
+{ "status": "ok" }
+```
+
+---
+
+### `POST /spiceplan`
+
+Create a spice plan from a dish name.
+
+**Request JSON:**
+
+```json
+{
+  "dish": "chili con carne",
+  "servings": 2,
+  "intensity": "medium"
+}
+```
+
+**Response JSON (example):**
+
+```json
+{
+  "title": "chili con carne",
+  "spices": [
+    { "name": "chili", "grams": 2.0 },
+    { "name": "paprika", "grams": 1.5 },
+    { "name": "pfeffer", "grams": 0.5 },
+    { "name": "kreuzkümmel", "grams": 1.0 }
+  ]
+}
+```
+
+---
+
+### `POST /voiceplan`
+
+Capture speech locally, transcribe, and return a spice plan.
+
+- Relies on `speech_input.py` (uses `sounddevice`, `webrtcvad`, `faster-whisper`).
+- Can accept optional parameters like `lang`, `servings`, `intensity`.
+
+**Request JSON (example):**
+
+```json
+{
+  "lang": "de",
+  "servings": 2,
+  "intensity": "medium"
+}
+```
+
+**Response JSON:** same schema as `/spiceplan`, plus optional diagnostic fields like `"transcript"` depending on your implementation.
+
+---
+
+## CLI examples
+
+### cURL
+
+```bash
+# health
+curl http://localhost:8000/health
+
+# spice plan
+curl -X POST http://localhost:8000/spiceplan   -H "Content-Type: application/json"   -d '{"dish": "ratatouille", "servings": 2, "intensity": "medium"}'
+```
+
+### Python (requests)
+
+```python
+import requests
+
+base = "http://localhost:8000"
+
+print(requests.get(f"{base}/health").json())
+
+payload = {"dish": "chili con carne", "servings": 2, "intensity": "medium"}
+print(requests.post(f"{base}/spiceplan", json=payload).json())
+```
+
+---
+
+## Voice helper (optional)
+
+To test the microphone transcription alone:
+
+```python
+from speech_input import transcribe_once
+print(transcribe_once(lang_hint="de"))
+```
+
+`speech_input.py` defaults:
+
+- 16 kHz mono, 20 ms VAD frames
+- Stops after 0.8 s silence or 12 s max
+- Model: faster-whisper `"small"` (int8 compute)
+
+---
+
+## Notes
+
+- Keep the whitelist of allowed spices in the firmware (`include/lexicon.h`) if you want stricter matching on-device.
+- All private data (Wi-Fi SSID, passwords, IPs) belong in the firmware’s `config.h` and should be placeholders in public repos.

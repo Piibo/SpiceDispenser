@@ -1,8 +1,46 @@
-.pio
+# ==== PlatformIO ====
+.pio/
+.pioenvs/
+.piolibdeps/
+.pio/build/
+.pio/libdeps/
+.pio/test/
+.clang_complete
+.gcc-flags.json
+
+# ==== VSCode ====
 .vscode/.browse.c_cpp.db*
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+.vscode/settings.json
 
+# ==== Python (Host backend) ====
 host/.venv/
+host/__pycache__/
+host/.pytest_cache/
+host/*.pyc
+host/*.pyo
+host/*.pyd
 
+# ==== OS / Editor ====
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# ==== Build artifacts / logs ====
+*.elf
+*.bin
+*.hex
+*.map
+*.log
+
+# ==== Backup / temp ====
+backup/
+*.bak
+*.tmp
+*.old
+
+# ==== Test folders (if unused) ====
+/test/

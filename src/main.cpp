@@ -12,7 +12,7 @@
 #include "ui.h"
 #include "lexicon.h"
 
-// ---------- Forward Declarations (Lexikon/Matching) ----------
+// ---------- Forward Declarations (Lexicon/Matching) ----------
 static String normalize_spice(const String& inRaw);
 static int    levenshtein(const String& a, const String& b);
 static bool   findCanonicalSpice(const String& rawIn, String& canonOut);
@@ -26,23 +26,23 @@ static bool sel_armed  = false;
 static unsigned long sel_down_ms = 0;
 static constexpr unsigned LONG_PRESS_MS = 800;
 
-// Merker: Sind wir in der Einzelliste?
+// Merker: sind wir in der Einzelliste?
 static bool s_isManualList = false;
 
 // Debounce + Edges
-static int debounce_read(uint8_t pin, DebState* st){
+static int debounce_read(uint8_t pin, DebState* st) {
   int level = digitalRead(pin);
-  if(level == st->last_level){ if(st->stable_count<5) st->stable_count++; }
-  else { st->stable_count=0; st->last_level=level; }
-  if(st->stable_count>=5) st->stable_level=level;
+  if (level == st->last_level) { if (st->stable_count < 5) st->stable_count++; }
+  else { st->stable_count = 0; st->last_level = level; }
+  if (st->stable_count >= 5) st->stable_level = level;
   return st->stable_level;
 }
-static bool edge_falling(uint8_t pin, DebState* st){
+static bool edge_falling(uint8_t pin, DebState* st) {
   static uint8_t prev[64] = {0};
   static bool inited[64]  = {false};
   int val = debounce_read(pin, st);
   if (!inited[pin]) { prev[pin] = val; inited[pin] = true; }
-  bool falling = (prev[pin]==HIGH && val==LOW);
+  bool falling = (prev[pin] == HIGH && val == LOW);
   prev[pin] = val;
   return falling;
 }
@@ -51,17 +51,24 @@ static bool edge_falling(uint8_t pin, DebState* st){
 static char  spices_map[MAX_POS][SPICE_NAME_MAX];
 static int   pos_count = POS_COUNT_DEFAULT;
 
-static void spice_clear_all(){ for(int i=0;i<MAX_POS;i++) spices_map[i][0]='\0'; }
-static void lowercase_inplace(char *s){ for(size_t i=0; s && s[i]; ++i) s[i]=(char)tolower((unsigned char)s[i]); }
-static void spice_set(int idx, const char *name){
-  if(idx<0 || idx>=MAX_POS || !name) return;
-  strncpy(spices_map[idx], name, SPICE_NAME_MAX-1);
-  spices_map[idx][SPICE_NAME_MAX-1]='\0'; lowercase_inplace(spices_map[idx]);
+static void spice_clear_all() { for (int i = 0; i < MAX_POS; i++) spices_map[i][0] = '\0'; }
+static void lowercase_inplace(char* s) { for (size_t i = 0; s && s[i]; ++i) s[i] = (char)tolower((unsigned char)s[i]); }
+static void spice_set(int idx, const char* name) {
+  if (idx < 0 || idx >= MAX_POS || !name) return;
+  strncpy(spices_map[idx], name, SPICE_NAME_MAX - 1);
+  spices_map[idx][SPICE_NAME_MAX - 1] = '\0';
+  lowercase_inplace(spices_map[idx]);
 }
-static int find_pos_by_name(const char *name){
-  if(!name) return -1; char tmp[SPICE_NAME_MAX];
-  strncpy(tmp, name, SPICE_NAME_MAX-1); tmp[SPICE_NAME_MAX-1]='\0'; lowercase_inplace(tmp);
-  for(int i=0;i<pos_count;i++){ if(spices_map[i][0]=='\0') continue; if(strcmp(spices_map[i], tmp)==0) return i; }
+static int find_pos_by_name(const char* name) {
+  if (!name) return -1;
+  char tmp[SPICE_NAME_MAX];
+  strncpy(tmp, name, SPICE_NAME_MAX - 1);
+  tmp[SPICE_NAME_MAX - 1] = '\0';
+  lowercase_inplace(tmp);
+  for (int i = 0; i < pos_count; i++) {
+    if (spices_map[i][0] == '\0') continue;
+    if (strcmp(spices_map[i], tmp) == 0) return i;
+  }
   return -1;
 }
 
@@ -73,7 +80,7 @@ static void docToUIRecipes(const JsonDocument& doc, const char* title, std::vect
   JsonArrayConst arr = doc["spices"].as<JsonArrayConst>();
   const char* ttl = (title && *title) ? title : (doc["title"] | doc["dish"] | "AI-Rezept");
   Serial.printf("[CONV] docToUIRecipes: title='%s', spices.isNull=%d, size=%u\n",
-                ttl, arr.isNull()?1:0, (unsigned)(arr.isNull()?0:arr.size()));
+                ttl, arr.isNull() ? 1 : 0, (unsigned)(arr.isNull() ? 0 : arr.size()));
 
   out.clear();
   UIRecipe r;
@@ -117,9 +124,12 @@ static void docToUIRecipes(const JsonDocument& doc, const char* title, std::vect
 }
 
 // UI -> Mechanik-Targets
-static int build_targets_from_ui(const UIRecipe& r, TargetGrams* out, int out_max){
-  if(out_max<=0) return 0;
-  float grams_per_pos[MAX_POS]={0}; bool seen[MAX_POS]={0}; int order[MAX_POS]; int order_n=0;
+static int build_targets_from_ui(const UIRecipe& r, TargetGrams* out, int out_max) {
+  if (out_max <= 0) return 0;
+  float grams_per_pos[MAX_POS] = {0};
+  bool  seen[MAX_POS]          = {0};
+  int   order[MAX_POS];
+  int   order_n = 0;
 
   for (const auto& s : r.spices) {
     if (s.amount <= 0) continue;
@@ -128,31 +138,43 @@ static int build_targets_from_ui(const UIRecipe& r, TargetGrams* out, int out_ma
     grams_per_pos[pos] += (float)s.amount;
     if (!seen[pos]) { seen[pos] = true; order[order_n++] = pos; }
     Serial.printf("[MAP] + '%s' -> Pos%d (+%.3f g) = %.3f g\n",
-                  s.name.c_str(), pos+1, (float)s.amount, grams_per_pos[pos]);
+                  s.name.c_str(), pos + 1, (float)s.amount, grams_per_pos[pos]);
   }
 
-  int n=0; for(int k=0;k<order_n && n<out_max;k++){ int p = order[k]; if(grams_per_pos[p]>0) out[n++] = TargetGrams{ p, grams_per_pos[p] }; }
-  Serial.printf("[MAP] targets=%d\n", n); return n;
+  int n = 0;
+  for (int k = 0; k < order_n && n < out_max; k++) {
+    int p = order[k];
+    if (grams_per_pos[p] > 0) out[n++] = TargetGrams{ p, grams_per_pos[p] };
+  }
+  Serial.printf("[MAP] targets=%d\n", n);
+  return n;
 }
 
-static void run_cycle_targets_grams(uint32_t& servo_pos_us, const TargetGrams* tg, int n){
-  if(!tg || n<=0) return;
+static void run_cycle_targets_grams(uint32_t& servo_pos_us, const TargetGrams* tg, int n) {
+  if (!tg || n <= 0) return;
 
   servo_pos_us = mechServoToFront(servo_pos_us); delay(PAUSE_AFTER_COUPLE);
 
-  for(int i=0;i<n;i++){
+  for (int i = 0; i < n; i++) {
     int idx = tg[i].idx; float grams = tg[i].grams;
-    if(idx<0 || idx>=pos_count || grams<=0) continue;
-    mechGotoIndex(idx); delay(PAUSE_BEFORE_MOVE);
+    if (idx < 0 || idx >= pos_count || grams <= 0) continue;
 
-    servo_pos_us = mechDecoupleBack(servo_pos_us); delay(PAUSE_AFTER_COUPLE);
+    mechGotoIndex(idx);
+    delay(PAUSE_BEFORE_MOVE);
+
+    servo_pos_us = mechDecoupleBack(servo_pos_us);
+    delay(PAUSE_AFTER_COUPLE);
 
     float gpr = (GRAMS_PER_ROTATION[idx] > 0.001f) ? GRAMS_PER_ROTATION[idx] : 1.0f;
     float rotations = (grams / gpr);
-    Serial.printf("[DOSE] Pos%d: grams=%.3f, g/rot=%.3f -> rot=%.3f\n", idx+1, grams, gpr, rotations);
+    Serial.printf("[DOSE] Pos%d: grams=%.3f, g/rot=%.3f -> rot=%.3f\n",
+                  idx + 1, grams, gpr, rotations);
 
-    mechDispenseRotations(rotations); delay(PAUSE_AFTER_DISP);
-    servo_pos_us = mechServoToFront(servo_pos_us); delay(PAUSE_AFTER_COUPLE);
+    mechDispenseRotations(rotations);
+    delay(PAUSE_AFTER_DISP);
+
+    servo_pos_us = mechServoToFront(servo_pos_us);
+    delay(PAUSE_AFTER_COUPLE);
   }
 
   mechGotoIndex(0);
@@ -162,7 +184,7 @@ static void run_cycle_targets_grams(uint32_t& servo_pos_us, const TargetGrams* t
 
 // ---------------- Rotary ----------------
 #define ENCODER_COUNTS_PER_DETENT 2
-static int readEncoderNotches(){
+static int readEncoderNotches() {
   static bool inited = false;
   static uint8_t prev = 0;
   static int8_t accum = 0;
@@ -195,7 +217,7 @@ static void startVoiceAndShowResult() {
   Serial.println("[VOICE] startVoiceAndShowResult()");
   ui_renderVoiceInputScreen();
 
-  auto onSending = [](){
+  auto onSending = []() {
     Serial.println("[VOICE] VAD ended -> sending now");
     ui_renderVoiceSendRequestScreen();
   };
@@ -222,7 +244,7 @@ static void startVoiceAndShowResult() {
 
 static void startFixedPlanAndShow(const char* dish) {
   Serial.printf("[PLAN] startFixedPlanAndShow dish='%s'\n", dish);
-  auto onSending = [](){
+  auto onSending = []() {
     Serial.println("[PLAN] sending now");
     ui_renderVoiceSendRequestScreen();
   };
@@ -279,8 +301,8 @@ static String extract_spice_name_from_doc(const JsonDocument& doc) {
       if (n.length() > 0) return n;
     }
   }
-  if (doc["dish"].is<String>())   { String n = doc["dish"].as<String>();  n.trim(); if (n.length() > 0) return n; }
-  if (doc["title"].is<String>())  { String n = doc["title"].as<String>(); n.trim(); if (n.length() > 0) return n; }
+  if (doc["dish"].is<String>())  { String n = doc["dish"].as<String>();  n.trim(); if (n.length() > 0) return n; }
+  if (doc["title"].is<String>()) { String n = doc["title"].as<String>(); n.trim(); if (n.length() > 0) return n; }
   return "";
 }
 
@@ -288,11 +310,11 @@ static String extract_spice_name_from_doc(const JsonDocument& doc) {
 static String normalize_spice(const String& inRaw) {
   String s = inRaw;
   s.trim(); s.toLowerCase();
-  s.replace("ä","ae"); s.replace("ö","oe"); s.replace("ü","ue"); s.replace("ß","ss");
+  s.replace("ä", "ae"); s.replace("ö", "oe"); s.replace("ü", "ue"); s.replace("ß", "ss");
   String out; out.reserve(s.length());
-  for (size_t i=0; i<s.length(); ++i) {
+  for (size_t i = 0; i < s.length(); ++i) {
     char c = s.charAt(i);
-    if ((c>='a'&&c<='z') || (c>='0'&&c<='9') || c==' ') out += c;
+    if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == ' ') out += c;
   }
   while (out.indexOf("  ") >= 0) out.replace("  ", " ");
   out.trim();
@@ -300,17 +322,17 @@ static String normalize_spice(const String& inRaw) {
 }
 static int levenshtein(const String& a, const String& b) {
   const int n = a.length(), m = b.length();
-  if (n==0) return m;
-  if (m==0) return n;
-  std::vector<int> prev(m+1), curr(m+1);
-  for (int j=0; j<=m; ++j) prev[j] = j;
-  for (int i=1; i<=n; ++i) {
+  if (n == 0) return m;
+  if (m == 0) return n;
+  std::vector<int> prev(m + 1), curr(m + 1);
+  for (int j = 0; j <= m; ++j) prev[j] = j;
+  for (int i = 1; i <= n; ++i) {
     curr[0] = i;
-    for (int j=1; j<=m; ++j) {
-      int cost = (a.charAt(i-1)==b.charAt(j-1)) ? 0 : 1;
+    for (int j = 1; j <= m; ++j) {
+      int cost = (a.charAt(i - 1) == b.charAt(j - 1)) ? 0 : 1;
       int del  = prev[j]   + 1;
-      int ins  = curr[j-1] + 1;
-      int sub  = prev[j-1] + cost;
+      int ins  = curr[j - 1] + 1;
+      int sub  = prev[j - 1] + cost;
       curr[j] = min(del, min(ins, sub));
     }
     prev.swap(curr);
@@ -319,18 +341,18 @@ static int levenshtein(const String& a, const String& b) {
 }
 static bool findCanonicalSpice(const String& rawIn, String& canonOut) {
   String q = normalize_spice(rawIn);
-  if (q.length()==0) return false;
+  if (q.length() == 0) return false;
 
-  for (size_t i=0; i<SPICE_LEXICON_COUNT; ++i) {
+  for (size_t i = 0; i < SPICE_LEXICON_COUNT; ++i) {
     String cand = normalize_spice(String(SPICE_LEXICON[i]));
     if (cand == q) { canonOut = String(SPICE_LEXICON[i]); return true; }
   }
-  for (size_t i=0; i<SPICE_LEXICON_COUNT; ++i) {
+  for (size_t i = 0; i < SPICE_LEXICON_COUNT; ++i) {
     String cand = normalize_spice(String(SPICE_LEXICON[i]));
     if (q.indexOf(cand) >= 0 || cand.indexOf(q) >= 0) { canonOut = String(SPICE_LEXICON[i]); return true; }
   }
   int bestIdx = -1, bestDist = 9999;
-  for (size_t i=0; i<SPICE_LEXICON_COUNT; ++i) {
+  for (size_t i = 0; i < SPICE_LEXICON_COUNT; ++i) {
     String cand = normalize_spice(String(SPICE_LEXICON[i]));
     int d = levenshtein(q, cand);
     if (d < bestDist) { bestDist = d; bestIdx = (int)i; }
@@ -351,7 +373,7 @@ static void renameSelectedSpiceByVoice() {
   }
 
   ui_renderVoiceInputScreen(); // Aufnahme
-  auto onSending = [](){ ui_renderVoiceSendRequestScreen(); }; // Senden
+  auto onSending = []() { ui_renderVoiceSendRequestScreen(); }; // Senden
 
   JsonDocument doc;
   if (ai_post_voice("de", 1, "medium", doc, onSending)) {
@@ -373,8 +395,10 @@ static void renameSelectedSpiceByVoice() {
   ui_showDetail(); // zurück zur Liste
 }
 
-void setup(){
-  Serial.begin(115200); delay(150);
+// ---------------- Arduino lifecycle ----------------
+void setup() {
+  Serial.begin(115200);
+  delay(150);
 
   pinMode(BTN_SEL,   INPUT_PULLUP);
   pinMode(BTN_SERVO, INPUT_PULLUP);
@@ -403,9 +427,10 @@ void setup(){
   Serial.println("{\"status\":\"ready\"}");
 }
 
-void loop(){
+void loop() {
   ui_tick(0);
 
+  // Encoder
   int notches = readEncoderNotches();
   if (notches != 0) {
     UIState st = ui_getState();
@@ -414,12 +439,14 @@ void loop(){
     Serial.printf("[ENC] notch=%d (screen=%d)\n", notches, (int)st.screen);
   }
 
+  // Servo button
   if (edge_falling(BTN_SERVO, &db_servo)) {
     Serial.println("{\"btn\":\"SERVO\",\"event\":\"edge_falling\",\"action\":\"servo_toggle\"}");
     if (servo_pos_us == SERVO_BACK_US) servo_pos_us = mechServoToFront(servo_pos_us);
     else                               servo_pos_us = mechDecoupleBack(servo_pos_us);
   }
 
+  // Select button (short/long)
   if (edge_falling(BTN_SEL, &db_sel)) {
     sel_armed = true;
     sel_down_ms = millis();
@@ -462,14 +489,14 @@ void loop(){
     }
   }
 
-  // Serial 'dish: <text>' (Test)
-  while (Serial.available()){
-    char c=(char)Serial.read();
-    if(c=='\n'){
+  // Serial command: "dish: <text>"
+  while (Serial.available()) {
+    char c = (char)Serial.read();
+    if (c == '\n') {
       serialCmd.trim();
-      if(serialCmd.startsWith("dish:")){
+      if (serialCmd.startsWith("dish:")) {
         String dish = serialCmd.substring(5); dish.trim();
-        if(dish.length()>0){
+        if (dish.length() > 0) {
           Serial.printf("[SERIAL] dish='%s'\n", dish.c_str());
           JsonDocument doc;
           if (ai_post_plan(dish.c_str(), 2, "medium", doc)) {
@@ -479,32 +506,34 @@ void loop(){
             if (!uiRecipes.empty()) {
               s_isManualList = false;
               ui_showAIResult(uiRecipes);
-            } else ui_showAIError("Keine Gewuerze erkannt");
+            } else {
+              ui_showAIError("Keine Gewuerze erkannt");
+            }
           } else {
             ui_showAIError("AI-Fehler");
           }
         }
       }
-      serialCmd="";
-    } else if (c!='\r'){
+      serialCmd = "";
+    } else if (c != '\r') {
       serialCmd += c;
-      if(serialCmd.length()>512) serialCmd="";
+      if (serialCmd.length() > 512) serialCmd = "";
     }
   }
 
-  // Nach „OK/Weiter“ dosieren
+  // After "OK/Weiter": run dispensing
   UIRecipe edited;
   if (ui_takeEditedRecipe(edited)) {
     Serial.printf("[UI] confirm -> recipe='%s' items=%u\n",
                   edited.name.c_str(), (unsigned)edited.spices.size());
-    for (size_t i=0;i<edited.spices.size();++i) {
+    for (size_t i = 0; i < edited.spices.size(); ++i) {
       Serial.printf("  [UI] %u: '%s' -> %.3f g\n", (unsigned)i,
-        edited.spices[i].name.c_str(), edited.spices[i].amount);
+                    edited.spices[i].name.c_str(), edited.spices[i].amount);
     }
 
     TargetGrams tg[MAX_POS];
     int n = build_targets_from_ui(edited, tg, MAX_POS);
-    for (int i=0;i<n;i++) {
+    for (int i = 0; i < n; i++) {
       Serial.printf("  [MAP] idx=%d grams=%.3f\n", tg[i].idx, tg[i].grams);
     }
 

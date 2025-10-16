@@ -4,14 +4,16 @@
 #include <ArduinoJson.h>
 
 #include "ai.h"
-#include "config.h"   // erwartet: WIFI_SSID, WIFI_PW, AI_URL, AI_HEALTH
+#include "config.h"   // expects: WIFI_SSID, WIFI_PW, AI_URL, AI_HEALTH
 
-// ---------- kleine Log-Helper ----------
+// -----------------------------------------------------------------------------
+// Logging helpers
+// -----------------------------------------------------------------------------
 static void log_snippet(const char* tag, const String& s, size_t maxlen = 512) {
   size_t n = s.length();
   size_t m = n < maxlen ? n : maxlen;
   Serial.printf("[%s] len=%u, snippet[0..%u]: ", tag, (unsigned)n, (unsigned)m);
-  for (size_t i=0;i<m;i++) Serial.print((char)s[i]);
+  for (size_t i = 0; i < m; i++) Serial.print((char)s[i]);
   if (n > m) Serial.print(" ...");
   Serial.println();
 }
@@ -26,7 +28,7 @@ static void log_doc_basic(const JsonDocument& doc, const char* who) {
     Serial.printf("[JSON/%s] spices=null or not array\n", who);
   } else {
     Serial.printf("[JSON/%s] spices.size()=%u\n", who, (unsigned)arr.size());
-    uint16_t i=0;
+    uint16_t i = 0;
     for (JsonObjectConst sp : arr) {
       const char* nm = sp["name"] | "(null)";
       double g = sp["grams"] | -1.0;
@@ -40,7 +42,9 @@ static void log_doc_basic(const JsonDocument& doc, const char* who) {
     Serial.printf("[JSON/%s] transcript='%s'\n", who, doc["transcript"].as<const char*>());
 }
 
-// ---------- WLAN + Health (DEFINITIONEN) ----------
+// -----------------------------------------------------------------------------
+// Wi-Fi + health
+// -----------------------------------------------------------------------------
 bool wifi_connect() {
   WiFi.mode(WIFI_STA);
   WiFi.disconnect(true, true);
@@ -85,14 +89,16 @@ bool ai_health() {
   return (code == 200);
 }
 
-// interner Helper
+// Internal
 static bool ensure_wifi() {
   if (WiFi.status() == WL_CONNECTED) return true;
   Serial.println("[AI] WiFi not connected -> reconnect");
   return wifi_connect();
 }
 
-// ---------- AI Calls ----------
+// -----------------------------------------------------------------------------
+// AI calls
+// -----------------------------------------------------------------------------
 bool ai_post_voice(const char* lang,
                    int servings,
                    const char* intensity,

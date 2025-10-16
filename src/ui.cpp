@@ -6,37 +6,58 @@
 #include "icons.h"
 #include <cmath>
 
-// ---- interner UI-Status ----
+/*
+  -----------------------------------------------------------------------------
+  UI Module (implementation)
+  - START: two-tile launcher (AI-Gericht / Einzel-Gewuerz)
+  - DETAIL/EDIT: recipe list with top/bottom "Weiter" and a "Zurueck" row
+  - VOICE_*: simple microphone screens
+  -----------------------------------------------------------------------------
+*/
+
+// ------------------------------
+// Internal UI state
+// ------------------------------
 static std::vector<UIRecipe> g_recipes;
 static UIScreen g_screen = UIScreen::START;
-static int g_selected = 0;    // Rezeptindex (oder Kachelindex im START)
-static int g_detailTop = 0;   // Scroll-Offset in Detail/Edit
-static int g_detailSel = 0;   // Cursor-Zeile in Detail/Edit
-static String g_statusLine;   // optional; wird nicht eigens gezeichnet
+static int g_selected = 0;     // recipe index (or tile index on START)
+static int g_detailTop = 0;    // scroll offset in DETAIL/EDIT
+static int g_detailSel = 0;    // cursor row in DETAIL/EDIT
+static String g_statusLine;    // optional; not drawn by itself
 static bool g_hasPendingConfirm = false;
 static UIRecipe g_pendingRecipe;
-static int g_startSel = 0;    // 0=AI-Gericht, 1=Einzel-Gewuerz
-static bool g_showManualHint = false;
+static int g_startSel = 0;     // 0=AI-Gericht, 1=Einzel-Gewuerz
+[[maybe_unused]] static bool g_showManualHint = false; // reserved for UX hint
 
+// ------------------------------
+// Layout constants
+// ------------------------------
+static constexpr uint8_t LINE_H         = 10;
+static constexpr uint8_t TOP_MARGIN     = 12;
+static constexpr uint8_t ITEMS_PER_PAGE = 4;
+static constexpr uint8_t TEXT_X         = 4;
+static constexpr uint8_t TITLE_PAD_X    = 4;
 
-// Layout-Konstanten
-static const uint8_t LINE_H = 10;
-static const uint8_t TOP_MARGIN = 12;
-static const uint8_t ITEMS_PER_PAGE = 4;
-static const uint8_t TEXT_X = 4;
-static const uint8_t TITLE_PAD_X = 4;
-
+// ------------------------------
+// Display object (SW SPI)
+// ------------------------------
 U8G2_SSD1309_128X64_NONAME0_F_4W_SW_SPI u8g2(
   U8G2_R0, OLED_CLK, OLED_MOSI, OLED_CS, OLED_DC, OLED_RST
 );
 
+// ------------------------------
+// Small helpers
+// ------------------------------
 static inline int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
 static inline uint8_t recipeCount() {
   size_t n = g_recipes.size();
   return n > 255 ? 255 : static_cast<uint8_t>(n);
 }
+static inline int centerX(const char* s) { return (128 - (int)u8g2.getStrWidth(s)) / 2; }
 
-// --------- Title / Header ----------
+// ------------------------------
+// Title / header
+// ------------------------------
 static void drawTitle(const char* title, bool /*showBack*/) {
   u8g2.setDrawColor(1);
   u8g2.setFont(FONT_TEXT);
@@ -45,15 +66,17 @@ static void drawTitle(const char* title, bool /*showBack*/) {
   u8g2.setFont(FONT_TEXT);
 }
 
-// --------- START (Kacheln) ----------
+// ------------------------------
+// START (two tiles)
+// ------------------------------
 static void drawStart() {
   u8g2.clearBuffer();
   drawTitle("Lass uns kochen!", false);
 
-  const uint8_t TILE_W   = 56;
-  const uint8_t TILE_H   = 36;
-  const uint8_t TILE_RAD = 4;
-  const uint8_t TILE_GAP = 8;
+  constexpr uint8_t TILE_W   = 56;
+  constexpr uint8_t TILE_H   = 36;
+  constexpr uint8_t TILE_RAD = 4;
+  constexpr uint8_t TILE_GAP = 8;
 
   const int totalW = (2 * TILE_W) + TILE_GAP;
   const int x0 = (128 - totalW) / 2;
@@ -77,12 +100,12 @@ static void drawStart() {
     }
 
     u8g2.setFont(FONT_TEXT);
-    auto cx = [&](const char* s){ return tx + (TILE_W - (int)u8g2.getStrWidth(s)) / 2; };
-    int textY1 = ty + (TILE_H/2) - 3;
-    int textY2 = textY1 + 10;
+    const int textY1 = ty + (TILE_H / 2) - 3;
+    const int textY2 = textY1 + 10;
 
-    u8g2.drawStr(cx(t.l1), textY1, t.l1);
-    u8g2.drawStr(cx(t.l2), textY2, t.l2);
+    u8g2.drawStr(centerX(t.l1) - (128 - TILE_W) / 2 + tx, textY1, t.l1);
+    u8g2.drawStr(centerX(t.l2) - (128 - TILE_W) / 2 + tx, textY2, t.l2);
+
     if (selected) u8g2.setDrawColor(1);
   };
 
@@ -92,7 +115,9 @@ static void drawStart() {
   u8g2.sendBuffer();
 }
 
-// --------- DETAIL/EDIT-Liste ----------
+// ------------------------------
+// DETAIL/EDIT list
+// ------------------------------
 static String fmtAmount(double v) {
   long iv = lround(v);
   if (fabs(v - iv) < 0.05) return String(iv);
@@ -105,7 +130,7 @@ static void drawRecipeDetail(bool editing) {
   (void)editing;
   const UIRecipe& recipe = g_recipes[g_selected];
   const int total = (int)recipe.spices.size();
-  const int Nrows = total + 3; // Weiter(oben) + Spices + Weiter(unten) + Zurueck
+  const int Nrows = total + 3; // Weiter(top) + Spices + Weiter(bottom) + Zurueck
 
   u8g2.clearBuffer();
   drawTitle(recipe.name.c_str(), true);
@@ -118,13 +143,13 @@ static void drawRecipeDetail(bool editing) {
   }
 
   g_detailTop = clampi(g_detailTop, 0, max(0, Nrows - (int)ITEMS_PER_PAGE));
-  int start = g_detailTop;
-  int endExclusive = min(start + (int)ITEMS_PER_PAGE, Nrows);
+  const int start = g_detailTop;
+  const int endExclusive = min(start + (int)ITEMS_PER_PAGE, Nrows);
 
   for (int i = start; i < endExclusive; ++i) {
-    int line = i - start;
-    uint8_t y = TOP_MARGIN + 1 + line * LINE_H + 8;
-    bool isSel = (i == g_detailSel);
+    const int line = i - start;
+    const uint8_t y = TOP_MARGIN + 1 + line * LINE_H + 8;
+    const bool isSel = (i == g_detailSel);
 
     if (isSel) {
       u8g2.drawBox(0, TOP_MARGIN + line * LINE_H, 128, LINE_H);
@@ -145,67 +170,68 @@ static void drawRecipeDetail(bool editing) {
       const UISpice& sp = recipe.spices[i - 1];
       u8g2.setFont(FONT_TEXT);
       u8g2.drawStr(TEXT_X, y, sp.name.c_str());
-      String amt = fmtAmount(sp.amount);
-      u8g2_uint_t w = u8g2.getStrWidth(amt.c_str());
+      const String amt = fmtAmount(sp.amount);
+      const u8g2_uint_t w = u8g2.getStrWidth(amt.c_str());
       u8g2.drawStr(128 - TITLE_PAD_X - w, y, amt.c_str());
     }
 
     if (isSel) u8g2.setDrawColor(1);
   }
 
-  if (start > 0)                 drawIcon(IconType::ChevUp,   122, TOP_MARGIN + 8);
-  if (endExclusive < Nrows)      drawIcon(IconType::ChevDown, 122, 64 - 2);
+  if (start > 0)            drawIcon(IconType::ChevUp,   122, TOP_MARGIN + 8);
+  if (endExclusive < Nrows) drawIcon(IconType::ChevDown, 122, 64 - 2);
 
   u8g2.sendBuffer();
 }
 
-// --------- Voice Screens ----------
+// ------------------------------
+// Voice screens
+// ------------------------------
 static void drawVoiceInput() {
   u8g2.clearBuffer();
-  int xPos = 128/2;
-  int yPos = 64/2;
-  drawIcon(IconType::Microphone, xPos - 5,  yPos);
+  const int xPos = 128 / 2;
+  const int yPos = 64 / 2;
+  drawIcon(IconType::Microphone, xPos - 5, yPos);
 
-  auto centerX = [](const char* s) -> int {
-    return (128 - (int)u8g2.getStrWidth(s)) / 2;
-  };
   u8g2.setFont(FONT_TEXT);
-  u8g2.drawStr(centerX("Was moechtest du"), yPos + 10 , "Was moechtest du");
-  u8g2.drawStr(centerX("essen?"),           yPos + 20 , "essen?");
+  u8g2.drawStr(centerX("Was moechtest du"), yPos + 10, "Was moechtest du");
+  u8g2.drawStr(centerX("essen?"),           yPos + 20, "essen?");
   u8g2.sendBuffer();
 }
 
 static void drawSendRequest() {
   u8g2.clearBuffer();
-  int xPos = 128/2;
-  int yPos = 64/2;
-  drawIcon(IconType::Microphone, xPos - 5,  yPos);
+  const int xPos = 128 / 2;
+  const int yPos = 64 / 2;
+  drawIcon(IconType::Microphone, xPos - 5, yPos);
 
-  auto centerX = [](const char* s) -> int {
-    return (128 - (int)u8g2.getStrWidth(s)) / 2;
-  };
   u8g2.setFont(FONT_TEXT);
-  u8g2.drawStr(centerX("Jetzt"), yPos + 10 , "Jetzt");
-  u8g2.drawStr(centerX("Sprechen"),      yPos + 20 , "Sprechen");
+  u8g2.drawStr(centerX("Jetzt"),     yPos + 10, "Jetzt");
+  u8g2.drawStr(centerX("Sprechen"),  yPos + 20, "Sprechen");
   u8g2.sendBuffer();
 }
 
-// --------- Top-Level Render ----------
+// ------------------------------
+// Top-level render switch
+// ------------------------------
 static void render() {
   switch (g_screen) {
-    case UIScreen::START:       drawStart();        break;
-    case UIScreen::DETAIL:      drawRecipeDetail(false); break;
-    case UIScreen::EDIT:        drawRecipeDetail(true);  break;
-    case UIScreen::VOICE_INPUT: drawVoiceInput();   break;
-    case UIScreen::VOICE_SEND:  drawSendRequest();  break;
+    case UIScreen::START:       drawStart();              break;
+    case UIScreen::DETAIL:      drawRecipeDetail(false);  break;
+    case UIScreen::EDIT:        drawRecipeDetail(true);   break;
+    case UIScreen::VOICE_INPUT: drawVoiceInput();         break;
+    case UIScreen::VOICE_SEND:  drawSendRequest();        break;
   }
 }
 
-// --------- Public API ----------
+// ------------------------------
+// Public API
+// ------------------------------
 void ui_renderVoiceInputScreen() {
   g_screen = UIScreen::VOICE_INPUT;
   render();
 }
+
 void ui_renderVoiceSendRequestScreen() {
   g_screen = UIScreen::VOICE_SEND;
   render();
@@ -222,11 +248,12 @@ void ui_init() {
   g_detailSel = 0;
   g_statusLine = "";
   g_hasPendingConfirm = false;
+
   render();
 }
 
 void ui_showAIResult(const std::vector<UIRecipe>& recipes) {
-  g_recipes = recipes;
+  g_recipes  = recipes;
   g_selected = 0;
 
   if (g_recipes.empty() || g_recipes[0].spices.empty()) {
@@ -235,6 +262,7 @@ void ui_showAIResult(const std::vector<UIRecipe>& recipes) {
     render();
     return;
   }
+
   g_screen = UIScreen::DETAIL;
   g_detailTop = 0;
   g_detailSel = 0;
@@ -274,7 +302,7 @@ void ui_showDetail() {
 }
 
 void ui_tick(int /*potRaw*/) {
-  // kein Blink, keine extra Animation
+  // no periodic animation
 }
 
 void ui_onBtnClick() {
@@ -341,7 +369,7 @@ void ui_onBtnClick() {
 }
 
 UIState ui_getState() {
-  int sel = (g_screen == UIScreen::START) ? g_startSel : g_selected;
+  const int sel = (g_screen == UIScreen::START) ? g_startSel : g_selected;
   return UIState{ g_screen, sel, g_detailSel };
 }
 
@@ -357,7 +385,7 @@ void ui_nudgeSelection(int delta) {
   if (delta == 0) return;
 
   if (g_screen == UIScreen::START) {
-    int newSel = clampi(g_startSel + delta, 0, 1);
+    const int newSel = clampi(g_startSel + delta, 0, 1);
     if (newSel != g_startSel) { g_startSel = newSel; drawStart(); }
     return;
   }
@@ -365,7 +393,7 @@ void ui_nudgeSelection(int delta) {
   if (g_screen == UIScreen::DETAIL || g_screen == UIScreen::EDIT) {
     const int total = (int)g_recipes[g_selected].spices.size();
     const int Nrows = total + 3;
-    int newSel = clampi(g_detailSel + delta, 0, Nrows - 1);
+    const int newSel = clampi(g_detailSel + delta, 0, Nrows - 1);
 
     if (newSel != g_detailSel) {
       g_detailSel = newSel;
@@ -378,20 +406,18 @@ void ui_nudgeSelection(int delta) {
 }
 
 void ui_nudgeAmount(int delta) {
-  if (delta == 0) return;
-  if (g_screen != UIScreen::EDIT) return;
+  if (delta == 0 || g_screen != UIScreen::EDIT) return;
 
   const int total = (int)g_recipes[g_selected].spices.size();
   const int spiceIdx = g_detailSel - 1; // 1..total
-
   if (spiceIdx < 0 || spiceIdx >= total) return;
 
   UIRecipe& r = g_recipes[g_selected];
   UISpice&  s = r.spices[spiceIdx];
 
-  const double step = 0.5;
-  const double minAmt = 0.0;
-  const double maxAmt = 9.0;
+  constexpr double step   = 0.5;
+  constexpr double minAmt = 0.0;
+  constexpr double maxAmt = 9.0;
 
   double newAmt = s.amount + delta * step;
   if (newAmt < minAmt) newAmt = minAmt;

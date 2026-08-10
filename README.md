@@ -32,7 +32,7 @@ pip install -r host/requirements.txt   # + Ollama installieren, Modell laden (z.
 python host/ai_host.py --voice         # oder mit Gerichtsnamen als Argument
 ```
 
-**Firmware (PlatformIO):** `src/config.h` anpassen (WLAN-Zugangsdaten, IP des Host-Rechners), dann auf das ESP32-C6-Board flashen:
+**Firmware (PlatformIO):** `src/secrets.h.example` nach `src/secrets.h` kopieren und WLAN-Zugangsdaten + Host-IP eintragen (die Datei ist gitignored, landet also nie im Repo), dann auf das ESP32-C6-Board flashen:
 
 ```bash
 pio run -t upload

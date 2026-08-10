@@ -2,12 +2,16 @@
 #include <Arduino.h>
 
 // --- WLAN & AI-Service ---
-// Eigene Werte eintragen: WLAN-Zugangsdaten + IP des Rechners, auf dem
-// host/ai_host.py laeuft (Port 8000).
-inline constexpr const char* WIFI_SSID = "YOUR_WIFI_SSID";
-inline constexpr const char* WIFI_PW   = "YOUR_WIFI_PASSWORD";
-inline constexpr const char* AI_URL    = "http://192.168.0.100:8000/spiceplan";
-inline constexpr const char* AI_HEALTH = "http://192.168.0.100:8000/health";
+// Echte Zugangsdaten gehoeren in src/secrets.h (gitignored, nicht im Repo).
+// Vorlage: src/secrets.h.example — kopieren, Werte eintragen, fertig.
+#if __has_include("secrets.h")
+  #include "secrets.h"
+#else
+  inline constexpr const char* WIFI_SSID = "YOUR_WIFI_SSID";
+  inline constexpr const char* WIFI_PW   = "YOUR_WIFI_PASSWORD";
+  inline constexpr const char* AI_URL    = "http://192.168.0.100:8000/spiceplan";
+  inline constexpr const char* AI_HEALTH = "http://192.168.0.100:8000/health";
+#endif
 
 // --- Pins / IO-Timings sind in pins.h bzw. mech.cpp ---
 

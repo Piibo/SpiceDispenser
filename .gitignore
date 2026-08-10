@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 .pio/
 .vscode/
+
+# Echte Zugangsdaten (Vorlage: src/secrets.h.example)
+src/secrets.h

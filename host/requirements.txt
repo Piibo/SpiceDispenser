@@ -1,1 +1,15 @@
+# --- Core ---
+requests
 pyserial
+numpy
+
+# --- HTTP server for the ESP32 (ai_host.py --serve) ---
+fastapi
+uvicorn
+pydantic
+
+# --- Speech recognition ---
+sounddevice
+webrtcvad
+faster-whisper
+

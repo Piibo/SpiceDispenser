@@ -9,7 +9,7 @@
 ```
  Sprache/Text ──▶ host/ai_host.py (Python, PC)          src/ (C++, ESP32-C6)
                   ├─ faster-whisper ASR + VAD            ├─ empfängt Gewürzplan (JSON)
-                  ├─ LLM via Ollama (Mistral, lokal)     ├─ Schrittmotor: Karussell
+                  ├─ LLM via Ollama (Mistral, lokal)     ├─ Schrittmotor: Linearachse
                   ├─ Wikipedia-Plausibilitätscheck       │   zur Gewürzposition
                   ├─ Whitelist + Synonym-Normalisierung  ├─ Servo: Dosiermechanik
                   └─ Mengen in Gramm, skalierbar    ──▶  └─ Taster + Statusanzeige
@@ -17,11 +17,11 @@
 
 1. **Eingabe:** Gericht nennen — getippt oder gesprochen. Spracherkennung läuft komplett lokal (faster-whisper + webrtcvad, kein Cloud-Dienst).
 2. **Gewürz-Bestimmung** (`host/ai_host.py`): Ein lokales LLM (Ollama, Default Mistral) liefert eine JSON-Liste typischer Gewürze mit Grammmengen, skalierbar nach Portionen und Schärfe. Gegen Halluzinationen abgesichert: Wikipedia-Check (DE/EN), ob das Gericht existiert; Fuzzy-Abgleich gegen eine Gewürz-Whitelist; Synonym-Normalisierung; Fallback bei invalidem JSON; Mengen-Grenzen mit Warnungen.
-3. **Dosierung** (`src/`): Der ESP32-C6 empfängt den Plan, ein Schrittmotor dreht das Gewürzkarussell zur richtigen Position, ein Servo koppelt die Dosiermechanik und gibt die Menge über kalibrierte Umdrehungen (g/Umdrehung pro Position) aus.
+3. **Dosierung** (`src/`): Der ESP32-C6 empfängt den Plan, ein Schrittmotor fährt die Gewürzbehälter auf einer Linearachse zur richtigen Position, ein Servo koppelt die Dosiermechanik und gibt die Menge über kalibrierte Umdrehungen (g/Umdrehung pro Position) aus.
 
 ## Hardware
 
-ESP32-C6 DevKit · Schrittmotor (STEP/DIR-Treiber) · Servo für die Dosier-Kopplung · Taster · Gewürzkarussell mit bis zu 32 Positionen
+ESP32-C6 DevKit · Schrittmotor (STEP/DIR-Treiber) auf einer Linearachse mit fünf Gewürzbehältern (Firmware ausgelegt für bis zu 32 Positionen) · Servo für die Dosier-Kopplung · Taster
 
 ## Setup
 

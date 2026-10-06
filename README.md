@@ -2,7 +2,7 @@
 
 **Gericht nennen (per Sprache oder Text) → ein lokales LLM bestimmt die typischen Gewürze samt Grammmengen → die Maschine dosiert sie automatisch.**
 
-▶️ **[Demo-Video auf YouTube](https://youtu.be/Efl0KOGhpKA)** · 📁 Mehr Kontext auf meiner [Portfolio-Seite](https://github.com/Piibo/portfolio/tree/main/projekte/spice-dispenser)
+▶️ **[Demo-Video auf YouTube](https://youtu.be/kATW5-pVZzE)** · 📁 Mehr Kontext auf meiner [Portfolio-Seite](https://github.com/Piibo/portfolio/tree/main/projekte/spice-dispenser)
 
 ## Wie es funktioniert
 

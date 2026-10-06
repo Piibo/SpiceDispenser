@@ -1,4 +1,4 @@
-# SpAice — KI-gesteuerter Gewürzautomat
+# SpAice: KI-gesteuerter Gewürzautomat
 
 **Gericht nennen (per Sprache oder Text) → ein lokales LLM bestimmt die typischen Gewürze samt Grammmengen → die Maschine dosiert sie automatisch.**
 

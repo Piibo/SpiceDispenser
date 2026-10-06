@@ -1,13 +1,13 @@
-# SpiceDispenser – Host AI Service
+# SpiceDispenser: Host AI Service
 
 Local Python backend used by the ESP32 firmware.  
 Provides HTTP endpoints to create spice plans from a dish name and (optionally) via local speech recognition.
 
 ## Files
 
-- `ai_host.py` – HTTP API server (expects requests from the ESP32)
-- `speech_input.py` – helper to capture and transcribe one utterance via microphone (used by the server for `/voiceplan` if configured)
-- `requirements.txt` – Python dependencies
+- `ai_host.py`: HTTP API server (expects requests from the ESP32)
+- `speech_input.py`: helper to capture and transcribe one utterance via microphone (used by the server for `/voiceplan` if configured)
+- `requirements.txt`: Python dependencies
 
 ## Install
 
